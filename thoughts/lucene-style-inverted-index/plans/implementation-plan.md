@@ -221,6 +221,8 @@ lowercase ASCII letters. Searching for `rust` returns an empty postings iterator
 
 ## Phase 1: Build the In-Memory Correctness Oracle
 
+**Status: Complete**
+
 ### Goal
 
 Build the simplest index that can answer an exact term lookup, without disk storage or
@@ -266,7 +268,7 @@ learned:
 - Make the boundary between validated input and indexing explicit.
 - Return a defined error before the `u32` document ID overflows.
 
-**Implementation checkpoint:** Pause for manual confirmation before Phase 2.
+**Implementation checkpoint:** Approved. Phase 2 is ready to begin.
 
 ---
 
