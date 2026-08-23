@@ -1,0 +1,135 @@
+Rust is a systems programming language
+Search engines store terms in an inverted index
+Each line in this file is one document
+A term maps to the documents that contain it
+Document identifiers are assigned in file order
+Tokens stay in their original case
+Rust and rust are different terms
+An inverted index makes word lookup fast
+The tokenizer splits text on whitespace
+Only ASCII letters and digits are valid tokens
+Numbers like Rust2024 and R2D2 are allowed
+Repeated spaces do not create empty tokens
+Leading spaces are ignored by the tokenizer
+Trailing spaces are ignored by the tokenizer
+Validation runs before any document is indexed
+Invalid punctuation would reject the whole file
+This sample has no commas periods or quotes
+Query will later look up a single word
+Indexing reads every line as a separate document
+Postings lists store document identifiers
+A missing term should return no documents
+Hash maps can hold terms during a first build
+Later a segment file can replace the hash map
+Memory maps can reopen an immutable segment
+Binary search can find a term in sorted order
+Delta encoding can shrink document identifier lists
+Term frequency counts how often a word repeats
+The same word twice in one line is one posting
+A second line with that word adds another posting
+Fast lookup matters more than fancy ranking here
+This project does not score or rank results
+Phrase queries are out of scope for now
+Deletes and segment merges are also out of scope
+The CLI waits for index and query commands
+Index takes a local document path
+Query takes one word
+Errors should stop the process
+A good first corpus is small and easy to check
+You can count postings by reading this file
+Wikipedia is too noisy for the current validator
+Simple English dumps need cleanup before use
+Project Gutenberg books contain punctuation
+A hand made file is enough to run today
+Benchmarking can use larger cleaned dumps later
+Throughput is documents per second while indexing
+Latency is the time to look up one term
+Segment size is the bytes written to disk
+Repeatable tests help keep performance honest
+Start with correctness then measure speed
+Keep the document grammar narrow on purpose
+Words may include digits such as year 2026
+Field names like title and body can wait
+One field is enough for this first index
+The reader and writer should stay symmetric
+Every offset read from disk must be checked
+A corrupt file should become a clear error
+Panics are not a valid failure mode
+Empty lines are not valid documents
+This line has several rust tokens rust rust
+Case variants include Index INDEX and index
+Search Search and SEARCH stay distinct
+Document zero is the first line in the file
+Document one is the second line in the file
+You can query rust after indexing this path
+You can also query inverted or tokenizer
+Common words like is and a appear often
+Rare words like mmap appear less often
+Postings for rare terms stay short
+Postings for common terms grow longer
+That skew is normal in natural language
+Even this small file already shows that skew
+Later tests can scale from hundreds to millions
+Do not start with a full Wikipedia dump
+Clean data beats huge dirty data
+This file is the first fixture for the CLI
+Run index on data sample txt
+Then implement query against the built index
+Keep the command loop running after success
+Fail only when a real error happens
+Five hundred words is enough for a smoke test
+The next corpus can be generated from a word list
+After that a cleaned Simple English dump is useful
+Full English Wikipedia is a late stress test
+Disk layout then becomes the main question
+CPU time then becomes the next question
+Cache behavior then becomes visible
+None of that is needed to run tonight
+Read this file once by hand after a query
+If rust is missing the index is wrong
+If every line matches rust the tokenizer is wrong
+Expect rust on the first line and a few later lines
+Expect inverted on the search engine lines
+Expect document on several definition lines
+This last block pads the corpus toward the word goal
+Systems software needs care around memory safety
+Borrow checking prevents many classes of bugs
+An index is just a map from term to postings
+Postings are just lists of document identifiers
+Identifiers are just integers assigned in order
+Integers are cheap to store and cheap to compare
+Compare them in sorted order for a merge
+Merge is how larger engines combine segments
+This engine has one segment and that is fine
+Fine is the right target for a first run
+Run the CLI point it at this file and index it
+After indexing open a query and type a word
+The word should be ASCII alphanumeric like rust
+Try tokenizer validation document postings and mmap
+Try a word that is absent such as zebra
+Absent words should not crash the program
+They should produce an empty result later
+Until query is built the command can stay a todo
+The index path is the only input you need now
+Use this file as the local document path
+It contains about five hundred words on purpose
+Each word is safe for the current validator
+No punctuation no accents no empty documents
+That is the whole point of this sample corpus
+When benchmarks arrive replace this file with larger ones
+Keep this file around as the tiny correctness check
+Tiny checks catch bugs before long runs waste time
+Time spent on a clean fixture is time saved later
+Later you can add more fixtures for edge cases
+Edge cases include digits mixed case and repeated terms
+Repeated terms belong in both one document and many
+Many documents make the postings lists more interesting
+Interesting lists are easier to debug than a single hit
+A single hit is still useful for the first query
+First make the CLI index this file successfully
+Success means validation passes and indexing starts
+Start small then grow the dataset with intent
+Intent beats downloading a random knowledge base
+Knowledge bases are great after the grammar widens
+Until then this five hundred word file is the dataset
+Dataset complete for the first inverted index run
