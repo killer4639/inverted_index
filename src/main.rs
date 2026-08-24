@@ -1,6 +1,8 @@
 mod doc_validator;
 mod index_builder;
 mod inverted_index;
+mod postings_codec;
+mod varint;
 
 use std::io::{self, Write};
 use std::process;
