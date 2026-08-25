@@ -1,5 +1,6 @@
 mod doc_validator;
 mod index_builder;
+mod index_codec;
 mod inverted_index;
 mod postings_codec;
 mod varint;
@@ -10,6 +11,8 @@ use std::process;
 use crate::index_builder::IndexBuilder;
 use crate::inverted_index::InvertedIndex;
 use doc_validator::validate_doc;
+
+const DEFAULT_SEGMENT_PATH: &str = "segment.idx";
 
 fn main() {
     let stdin = io::stdin();
@@ -36,19 +39,22 @@ fn main() {
         let mut parts = line.split_whitespace();
         let result = match (parts.next(), parts.next()) {
             (Some("index"), Some(path)) => index_document(path, &mut index_builder),
-            (Some("finalize"), None) => match finalize_index(&mut index_builder) {
-                Ok(index) => {
-                    println!(
-                        "finalized {} document(s), {} term(s), {} posting(s)",
-                        index.document_count(),
-                        index.term_count(),
-                        index.posting_count()
-                    );
-                    inverted_index = Some(index);
-                    Ok(())
+            (Some("finalize"), None) => {
+                match finalize_index(&mut index_builder, DEFAULT_SEGMENT_PATH) {
+                    Ok(index) => {
+                        println!(
+                            "finalized {} document(s), {} term(s), {} posting(s) to {}",
+                            index.document_count(),
+                            index.term_count(),
+                            index.posting_count(),
+                            DEFAULT_SEGMENT_PATH
+                        );
+                        inverted_index = Some(index);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
+            }
             (Some("query"), Some(word)) => match inverted_index.as_ref() {
                 Some(index) => query_word(word, index),
                 None => Err("index is not ready to be queried".to_owned()),
@@ -78,13 +84,20 @@ fn index_document(path: &str, index_builder: &mut Option<IndexBuilder>) -> Resul
     Ok(())
 }
 
-fn finalize_index(index_builder: &mut Option<IndexBuilder>) -> Result<InvertedIndex, String> {
+fn finalize_index(
+    index_builder: &mut Option<IndexBuilder>,
+    segment_path: &str,
+) -> Result<InvertedIndex, String> {
     let builder = match index_builder.take() {
         Some(builder) => builder,
         None => return Err("index is already finalized".to_owned()),
     };
 
-    builder.finalize()
+    let index = builder.finalize()?;
+    match index_codec::encode(segment_path, &index) {
+        Ok(()) => Ok(index),
+        Err(error) => Err(format!("failed to write segment: {error}")),
+    }
 }
 
 fn query_word(word: &str, inverted_index: &InvertedIndex) -> Result<(), String> {
@@ -110,14 +123,39 @@ fn query_word(word: &str, inverted_index: &InvertedIndex) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_segment_path() -> std::path::PathBuf {
+        let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cli-inverted-index-segment-{}-{id}.idx",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn documents_cannot_be_added_after_finalization() {
         let mut builder = Some(IndexBuilder::new());
-        let _index = finalize_index(&mut builder).unwrap();
+        let path = test_segment_path();
+        let _index = finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
 
         let error = index_document("unused.txt", &mut builder).unwrap_err();
 
         assert_eq!(error, "cannot add documents after finalization");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn finalization_writes_the_segment() {
+        let mut builder = Some(IndexBuilder::new());
+        let path = test_segment_path();
+
+        let _index = finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
+
+        assert!(path.exists());
+        fs::remove_file(path).unwrap();
     }
 }

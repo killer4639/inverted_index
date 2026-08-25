@@ -47,4 +47,7 @@ impl InvertedIndex {
     pub fn posting_count(&self) -> usize {
         self.posting_count
     }
+    pub(crate) fn terms(&self) -> impl Iterator<Item = (&String, &Vec<Posting>)> {
+        self.postings.iter()
+    }
 }
