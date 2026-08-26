@@ -6,11 +6,11 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAGIC: &[u8; 8] = b"INVIDX\0\0";
-const FORMAT_VERSION: u16 = 1;
-const HEADER_LENGTH: usize = 26;
-const TERM_OFFSET_LENGTH: usize = 8;
-const CHECKSUM_LENGTH: usize = 4;
+pub const MAGIC: &[u8; 8] = b"INVIDX\0\0";
+pub const FORMAT_VERSION: u16 = 1;
+pub const HEADER_LENGTH: usize = 26;
+pub const TERM_OFFSET_LENGTH: usize = 8;
+pub const CHECKSUM_LENGTH: usize = 4;
 
 static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 

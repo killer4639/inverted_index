@@ -3,6 +3,7 @@ mod index_builder;
 mod index_codec;
 mod inverted_index;
 mod postings_codec;
+mod segment_reader;
 mod varint;
 
 use std::io::{self, Write};
