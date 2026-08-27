@@ -14,12 +14,13 @@ use crate::index_builder::IndexBuilder;
 use crate::query_engine::QueryEngine;
 use doc_validator::validate_doc;
 
-const DEFAULT_SEGMENT_PATH: &str = "segment.idx";
+const USAGE: &str = "usage:
+  build <corpus> <segment>
+  lookup <segment> <term>";
 
 fn main() {
     let stdin = io::stdin();
-    let mut index_builder = Some(IndexBuilder::new());
-    let mut query_engine: Option<QueryEngine> = None;
+    let mut open_segment: Option<(String, QueryEngine)> = None;
 
     loop {
         print!("> ");
@@ -38,59 +39,28 @@ fn main() {
             }
         }
 
-        let mut parts = line.split_whitespace();
-        let result = match (parts.next(), parts.next()) {
-            (Some("index"), Some(path)) => index_document(path, &mut index_builder),
-            (Some("finalize"), None) => {
-                match finalize_index(&mut index_builder, DEFAULT_SEGMENT_PATH) {
-                    Ok((engine, document_count, term_count, posting_count)) => {
-                        println!(
-                            "finalized {document_count} document(s), {term_count} term(s), {posting_count} posting(s) to {DEFAULT_SEGMENT_PATH}"
-                        );
-                        query_engine = Some(engine);
-                        Ok(())
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            (Some("query"), Some(word)) => match query_engine.as_ref() {
-                Some(engine) => query_word(word, engine),
-                None => Err("index is not ready to be queried".to_owned()),
-            },
-            (None, _) => continue,
+        let arguments: Vec<&str> = line.split_whitespace().collect();
+        let result = match arguments.as_slice() {
+            ["build", corpus_path, segment_path] => build_segment(corpus_path, segment_path),
+            ["lookup", segment_path, term] => lookup_term(segment_path, term, &mut open_segment),
+            [] => continue,
             _ => {
-                eprintln!("usage:\n  index <path>\n  finalize\n  query <word>");
-                process::exit(2);
+                eprintln!("{USAGE}");
+                continue;
             }
         };
 
         if let Err(error) = result {
             eprintln!("{error}");
-            process::exit(1);
         }
     }
 }
 
-fn index_document(path: &str, index_builder: &mut Option<IndexBuilder>) -> Result<(), String> {
-    let builder = match index_builder.as_mut() {
-        Some(builder) => builder,
-        None => return Err("cannot add documents after finalization".to_owned()),
-    };
+fn build_segment(corpus_path: &str, segment_path: &str) -> Result<(), String> {
+    validate_doc(corpus_path)?;
 
-    validate_doc(path)?;
-    builder.create_index(path)?;
-    Ok(())
-}
-
-fn finalize_index(
-    index_builder: &mut Option<IndexBuilder>,
-    segment_path: &str,
-) -> Result<(QueryEngine, u32, usize, usize), String> {
-    let builder = match index_builder.take() {
-        Some(builder) => builder,
-        None => return Err("index is already finalized".to_owned()),
-    };
-
+    let mut builder = IndexBuilder::new();
+    builder.create_index(corpus_path)?;
     let index = builder.finalize()?;
     let document_count = index.document_count();
     let term_count = index.term_count();
@@ -99,16 +69,37 @@ fn finalize_index(
     if let Err(error) = index_codec::encode(segment_path, &index) {
         return Err(format!("failed to write segment: {error}"));
     }
-    drop(index);
 
-    match QueryEngine::new(segment_path) {
-        Ok(engine) => Ok((engine, document_count, term_count, posting_count)),
-        Err(error) => Err(format!("failed to open segment: {error}")),
-    }
+    println!(
+        "built {document_count} document(s), {term_count} term(s), \
+         {posting_count} posting(s) into {segment_path}"
+    );
+    Ok(())
 }
 
-fn query_word(word: &str, query_engine: &QueryEngine) -> Result<(), String> {
-    let decoder = match query_engine.query_term(word) {
+fn lookup_term(
+    segment_path: &str,
+    term: &str,
+    open_segment: &mut Option<(String, QueryEngine)>,
+) -> Result<(), String> {
+    let should_open = match open_segment.as_ref() {
+        Some((open_path, _)) => open_path != segment_path,
+        None => true,
+    };
+
+    if should_open {
+        let query_engine = match QueryEngine::new(segment_path) {
+            Ok(engine) => engine,
+            Err(error) => return Err(format!("failed to open segment: {error}")),
+        };
+        *open_segment = Some((segment_path.to_owned(), query_engine));
+    }
+
+    let query_engine = match open_segment.as_ref() {
+        Some((_, query_engine)) => query_engine,
+        None => return Err("segment is not open".to_owned()),
+    };
+    let decoder = match query_engine.query_term(term) {
         Ok(Some(decoder)) => decoder,
         Ok(None) => {
             println!("0 matching document(s)");
@@ -130,50 +121,4 @@ fn query_word(word: &str, query_engine: &QueryEngine) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn test_segment_path() -> std::path::PathBuf {
-        let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "cli-inverted-index-segment-{}-{id}.idx",
-            std::process::id()
-        ))
-    }
-
-    #[test]
-    fn documents_cannot_be_added_after_finalization() {
-        let mut builder = Some(IndexBuilder::new());
-        let path = test_segment_path();
-        let (engine, _, _, _) = finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
-
-        let error = index_document("unused.txt", &mut builder).unwrap_err();
-
-        assert_eq!(error, "cannot add documents after finalization");
-        drop(engine);
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn finalization_writes_the_segment() {
-        let mut builder = Some(IndexBuilder::new());
-        let path = test_segment_path();
-
-        let (engine, document_count, term_count, posting_count) =
-            finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
-
-        assert!(path.exists());
-        assert_eq!(document_count, 0);
-        assert_eq!(term_count, 0);
-        assert_eq!(posting_count, 0);
-        drop(engine);
-        fs::remove_file(path).unwrap();
-    }
 }
