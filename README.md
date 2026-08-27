@@ -5,7 +5,8 @@ document, and every term maps to the document IDs and frequencies where it
 appears.
 
 The index has two stages: documents are collected by a mutable builder, then
-finalized into a read-only index for querying.
+written to an on-disk segment. After that write, the in-memory index is dropped
+and queries run against the memory-mapped file.
 
 ## Run
 

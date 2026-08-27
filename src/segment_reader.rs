@@ -29,9 +29,6 @@ struct SegmentLayout {
 }
 
 impl SegmentReader {
-    /// Opens a segment that remains immutable for the lifetime of this reader.
-    ///
-    /// Published segments must not be modified or truncated while mapped.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = File::open(path)?;
         let mmap = map_immutable_segment(&file)?;
@@ -65,6 +62,75 @@ impl SegmentReader {
 
     pub fn postings(&self) -> &[u8] {
         &self.mmap[self.postings.clone()]
+    }
+
+    pub fn get_term(&self, index: u32) -> io::Result<&str> {
+        let range = self.term_record_range(index)?;
+        let record = parse_term_record(&self.mmap, range.start, range.end)?;
+        Ok(record.term)
+    }
+
+    pub fn get_postings(&self, index: u32) -> io::Result<PostingsDecoder<'_>> {
+        let range = self.term_record_range(index)?;
+        let record = parse_term_record(&self.mmap, range.start, range.end)?;
+        let postings = self.postings();
+        if record.postings_end > postings.len() {
+            return Err(invalid_data(
+                "postings range is outside the postings section",
+            ));
+        }
+
+        let posting_count = usize::try_from(record.document_frequency)
+            .map_err(|_| invalid_data("document frequency exceeds addressable memory"))?;
+        Ok(PostingsDecoder::new(
+            &postings[record.postings_start..record.postings_end],
+            posting_count,
+        ))
+    }
+
+    fn term_record_range(&self, index: u32) -> io::Result<Range<usize>> {
+        if index >= self.term_count {
+            return Err(invalid_input("term index out of range"));
+        }
+
+        let table = self.term_offset_table();
+        let table_index = usize::try_from(index)
+            .map_err(|_| invalid_data("term index exceeds addressable memory"))?;
+        let offset_start = table_index
+            .checked_mul(TERM_OFFSET_LENGTH)
+            .ok_or_else(|| invalid_data("term-offset table index overflow"))?;
+        let offset_end = offset_start
+            .checked_add(TERM_OFFSET_LENGTH)
+            .ok_or_else(|| invalid_data("term-offset table index overflow"))?;
+        if offset_end > table.len() {
+            return Err(unexpected_eof("truncated term-offset table"));
+        }
+
+        let term_start = u64::from_le_bytes(table[offset_start..offset_end].try_into().unwrap());
+        let term_start =
+            usize_from_u64(term_start, "term-record offset exceeds addressable memory")?;
+
+        let term_end = if index + 1 < self.term_count {
+            let next_end = offset_end
+                .checked_add(TERM_OFFSET_LENGTH)
+                .ok_or_else(|| invalid_data("term-offset table index overflow"))?;
+            if next_end > table.len() {
+                return Err(unexpected_eof("truncated term-offset table"));
+            }
+            let next_start = u64::from_le_bytes(table[offset_end..next_end].try_into().unwrap());
+            usize_from_u64(next_start, "term-record offset exceeds addressable memory")?
+        } else {
+            self.postings.start
+        };
+
+        if term_start < self.term_records.start
+            || term_end > self.term_records.end
+            || term_start >= term_end
+        {
+            return Err(invalid_data("term-record range is invalid"));
+        }
+
+        Ok(term_start..term_end)
     }
 }
 
@@ -251,13 +317,14 @@ fn validate_terms_and_postings(
     Ok(())
 }
 
-fn validate_term_record<'a>(
-    bytes: &'a [u8],
-    start: usize,
-    end: usize,
-    document_count: u32,
-    postings: &[u8],
-) -> io::Result<(&'a str, (usize, usize))> {
+struct ParsedTermRecord<'a> {
+    term: &'a str,
+    document_frequency: u32,
+    postings_start: usize,
+    postings_end: usize,
+}
+
+fn parse_term_record(bytes: &[u8], start: usize, end: usize) -> io::Result<ParsedTermRecord<'_>> {
     if start >= end {
         return Err(invalid_data("empty term record"));
     }
@@ -338,13 +405,33 @@ fn validate_term_record<'a>(
     let range_end = range_start
         .checked_add(range_length)
         .ok_or_else(|| invalid_data(format!("postings range overflow for term '{term}'")))?;
+
+    Ok(ParsedTermRecord {
+        term,
+        document_frequency,
+        postings_start: range_start,
+        postings_end: range_end,
+    })
+}
+
+fn validate_term_record<'a>(
+    bytes: &'a [u8],
+    start: usize,
+    end: usize,
+    document_count: u32,
+    postings: &[u8],
+) -> io::Result<(&'a str, (usize, usize))> {
+    let record = parse_term_record(bytes, start, end)?;
+    let term = record.term;
+    let range_start = record.postings_start;
+    let range_end = record.postings_end;
     if range_end > postings.len() {
         return Err(invalid_data(format!(
             "postings range for term '{term}' is outside the postings section"
         )));
     }
 
-    let posting_count = usize::try_from(document_frequency).map_err(|_| {
+    let posting_count = usize::try_from(record.document_frequency).map_err(|_| {
         invalid_data(format!(
             "document frequency for term '{term}' exceeds addressable memory"
         ))
@@ -388,6 +475,10 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
 }
 
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, message.into())
+}
+
 fn unexpected_eof(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::UnexpectedEof, message.into())
 }
@@ -399,6 +490,8 @@ mod tests {
     use crate::inverted_index::{InvertedIndex, Posting};
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
@@ -686,5 +779,88 @@ mod tests {
         }
 
         fs::remove_file(&path).unwrap();
+    }
+
+    static TEST_SEGMENT: OnceLock<()> = OnceLock::new();
+
+    fn test_segment_path() -> PathBuf {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("test_segment.idx");
+        TEST_SEGMENT.get_or_init(|| {
+            if !path.exists() {
+                index_codec::encode(&path, &test_index()).expect("write data/test_segment.idx");
+            }
+        });
+        path
+    }
+
+    fn collect_postings(decoder: PostingsDecoder<'_>) -> Vec<Posting> {
+        let mut postings = Vec::new();
+        for result in decoder {
+            postings.push(result.expect("postings should decode"));
+        }
+        postings
+    }
+
+    fn posting(document_id: u32, term_frequency: u32) -> Posting {
+        Posting {
+            document_id,
+            term_frequency,
+        }
+    }
+
+    #[test]
+    fn get_term_returns_sorted_dictionary_terms() {
+        let reader = SegmentReader::open(test_segment_path()).unwrap();
+
+        assert_eq!(reader.get_term(0).unwrap(), "rust");
+        assert_eq!(reader.get_term(1).unwrap(), "search");
+    }
+
+    #[test]
+    fn get_term_rejects_out_of_range_index() {
+        let reader = SegmentReader::open(test_segment_path()).unwrap();
+
+        let error = reader.get_term(2).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "term index out of range");
+    }
+
+    #[test]
+    fn get_postings_returns_decoded_lists() {
+        let reader = SegmentReader::open(test_segment_path()).unwrap();
+
+        let rust_postings = collect_postings(reader.get_postings(0).unwrap());
+        let search_postings = collect_postings(reader.get_postings(1).unwrap());
+
+        assert_eq!(rust_postings, vec![posting(0, 2), posting(3, 1)]);
+        assert_eq!(search_postings, vec![posting(1, 1)]);
+    }
+
+    #[test]
+    fn get_postings_rejects_out_of_range_index() {
+        let reader = SegmentReader::open(test_segment_path()).unwrap();
+
+        let error = match reader.get_postings(2) {
+            Ok(_) => panic!("out-of-range postings lookup should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "term index out of range");
+    }
+
+    #[test]
+    fn empty_segment_rejects_term_lookup() {
+        let index = InvertedIndex::from_finalized_postings(BTreeMap::new(), 0);
+        let path = write_segment(&index);
+        let reader = SegmentReader::open(&path).unwrap();
+
+        let error = reader.get_term(0).unwrap_err();
+        drop(reader);
+        fs::remove_file(&path).unwrap();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "term index out of range");
     }
 }

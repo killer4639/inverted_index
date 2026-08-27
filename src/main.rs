@@ -3,6 +3,7 @@ mod index_builder;
 mod index_codec;
 mod inverted_index;
 mod postings_codec;
+mod query_engine;
 mod segment_reader;
 mod varint;
 
@@ -10,7 +11,7 @@ use std::io::{self, Write};
 use std::process;
 
 use crate::index_builder::IndexBuilder;
-use crate::inverted_index::InvertedIndex;
+use crate::query_engine::QueryEngine;
 use doc_validator::validate_doc;
 
 const DEFAULT_SEGMENT_PATH: &str = "segment.idx";
@@ -18,7 +19,7 @@ const DEFAULT_SEGMENT_PATH: &str = "segment.idx";
 fn main() {
     let stdin = io::stdin();
     let mut index_builder = Some(IndexBuilder::new());
-    let mut inverted_index: Option<InvertedIndex> = None;
+    let mut query_engine: Option<QueryEngine> = None;
 
     loop {
         print!("> ");
@@ -42,22 +43,18 @@ fn main() {
             (Some("index"), Some(path)) => index_document(path, &mut index_builder),
             (Some("finalize"), None) => {
                 match finalize_index(&mut index_builder, DEFAULT_SEGMENT_PATH) {
-                    Ok(index) => {
+                    Ok((engine, document_count, term_count, posting_count)) => {
                         println!(
-                            "finalized {} document(s), {} term(s), {} posting(s) to {}",
-                            index.document_count(),
-                            index.term_count(),
-                            index.posting_count(),
-                            DEFAULT_SEGMENT_PATH
+                            "finalized {document_count} document(s), {term_count} term(s), {posting_count} posting(s) to {DEFAULT_SEGMENT_PATH}"
                         );
-                        inverted_index = Some(index);
+                        query_engine = Some(engine);
                         Ok(())
                     }
                     Err(error) => Err(error),
                 }
             }
-            (Some("query"), Some(word)) => match inverted_index.as_ref() {
-                Some(index) => query_word(word, index),
+            (Some("query"), Some(word)) => match query_engine.as_ref() {
+                Some(engine) => query_word(word, engine),
                 None => Err("index is not ready to be queried".to_owned()),
             },
             (None, _) => continue,
@@ -88,30 +85,44 @@ fn index_document(path: &str, index_builder: &mut Option<IndexBuilder>) -> Resul
 fn finalize_index(
     index_builder: &mut Option<IndexBuilder>,
     segment_path: &str,
-) -> Result<InvertedIndex, String> {
+) -> Result<(QueryEngine, u32, usize, usize), String> {
     let builder = match index_builder.take() {
         Some(builder) => builder,
         None => return Err("index is already finalized".to_owned()),
     };
 
     let index = builder.finalize()?;
-    match index_codec::encode(segment_path, &index) {
-        Ok(()) => Ok(index),
-        Err(error) => Err(format!("failed to write segment: {error}")),
+    let document_count = index.document_count();
+    let term_count = index.term_count();
+    let posting_count = index.posting_count();
+
+    if let Err(error) = index_codec::encode(segment_path, &index) {
+        return Err(format!("failed to write segment: {error}"));
+    }
+    drop(index);
+
+    match QueryEngine::new(segment_path) {
+        Ok(engine) => Ok((engine, document_count, term_count, posting_count)),
+        Err(error) => Err(format!("failed to open segment: {error}")),
     }
 }
 
-fn query_word(word: &str, inverted_index: &InvertedIndex) -> Result<(), String> {
-    if !word
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric())
-    {
-        return Err("query must be one ASCII-alphanumeric word".to_owned());
-    }
+fn query_word(word: &str, query_engine: &QueryEngine) -> Result<(), String> {
+    let decoder = match query_engine.query_term(word) {
+        Ok(Some(decoder)) => decoder,
+        Ok(None) => {
+            println!("0 matching document(s)");
+            return Ok(());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
 
-    let postings = inverted_index.query(word);
-    println!("{} matching document(s)", postings.len());
-    for posting in postings {
+    println!("{} matching document(s)", decoder.remaining_postings());
+    for result in decoder {
+        let posting = match result {
+            Ok(posting) => posting,
+            Err(error) => return Err(format!("failed to decode postings: {error:?}")),
+        };
         println!(
             "document {}: frequency {}",
             posting.document_id, posting.term_frequency
@@ -141,11 +152,12 @@ mod tests {
     fn documents_cannot_be_added_after_finalization() {
         let mut builder = Some(IndexBuilder::new());
         let path = test_segment_path();
-        let _index = finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
+        let (engine, _, _, _) = finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
 
         let error = index_document("unused.txt", &mut builder).unwrap_err();
 
         assert_eq!(error, "cannot add documents after finalization");
+        drop(engine);
         fs::remove_file(path).unwrap();
     }
 
@@ -154,9 +166,14 @@ mod tests {
         let mut builder = Some(IndexBuilder::new());
         let path = test_segment_path();
 
-        let _index = finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
+        let (engine, document_count, term_count, posting_count) =
+            finalize_index(&mut builder, path.to_str().unwrap()).unwrap();
 
         assert!(path.exists());
+        assert_eq!(document_count, 0);
+        assert_eq!(term_count, 0);
+        assert_eq!(posting_count, 0);
+        drop(engine);
         fs::remove_file(path).unwrap();
     }
 }

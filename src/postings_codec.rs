@@ -66,6 +66,7 @@ pub enum DecodeError {
     TrailingBytes,
 }
 
+#[derive(Debug)]
 pub struct PostingsDecoder<'a> {
     remaining_bytes: &'a [u8],
     previous_document_id: Option<DocumentId>,
@@ -81,6 +82,10 @@ impl<'a> PostingsDecoder<'a> {
             remaining_postings: posting_count,
             finished: false,
         }
+    }
+
+    pub fn remaining_postings(&self) -> usize {
+        self.remaining_postings
     }
 
     fn fail(&mut self, error: DecodeError) -> Option<Result<Posting, DecodeError>> {
