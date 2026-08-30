@@ -1,0 +1,455 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-30",
+  "git_commit": "852ef3b",
+  "working_tree_dirty": true,
+  "build_profile": "release",
+  "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+  "environment": {
+    "operating_system": "Microsoft Windows 11 Enterprise",
+    "operating_system_version": "10.0.26200",
+    "cpu": "AMD Ryzen 9 8945HS w/ Radeon 780M Graphics",
+    "physical_cores": 8,
+    "logical_processors": 16
+  },
+  "segment": {
+    "path": "segment.idx",
+    "format_version": 1,
+    "bytes": 71721865,
+    "document_count": 977078,
+    "term_count": 450549
+  },
+  "method": {
+    "command": "lookup-stats",
+    "samples_per_case": 10,
+    "duration_precision_ms": 0.001,
+    "fresh_open": "Each sample used a new engine process. The operating-system file cache was not explicitly cleared.",
+    "warm_reuse": "One process opened and validated the segment with a missing-term warmup before all measured lookups. The same memory map was reused.",
+    "percentile_method": "Nearest-rank p95"
+  },
+  "cases": [
+    {
+      "name": "fresh_open_common_term",
+      "term": "the",
+      "classification": "common",
+      "segment_access": "opened",
+      "matched_documents": 531382,
+      "dictionary_comparisons": 18,
+      "postings_bytes": 1062785,
+      "summary_ms": {
+        "segment_open": {
+          "min": 144.264,
+          "median": 147.465,
+          "p95": 154.758,
+          "max": 154.758,
+          "mean": 148.394
+        },
+        "total": {
+          "min": 146.457,
+          "median": 149.886,
+          "p95": 156.924,
+          "max": 156.924,
+          "mean": 150.7262
+        }
+      },
+      "samples": [
+        {
+          "run": 1,
+          "segment_open_ms": 145.849,
+          "dictionary_lookup_ms": 0.007,
+          "postings_decode_ms": 2.672,
+          "total_ms": 148.529
+        },
+        {
+          "run": 2,
+          "segment_open_ms": 149.958,
+          "dictionary_lookup_ms": 0.008,
+          "postings_decode_ms": 2.602,
+          "total_ms": 152.571
+        },
+        {
+          "run": 3,
+          "segment_open_ms": 147.906,
+          "dictionary_lookup_ms": 0.015,
+          "postings_decode_ms": 2.611,
+          "total_ms": 150.533
+        },
+        {
+          "run": 4,
+          "segment_open_ms": 146.757,
+          "dictionary_lookup_ms": 0.006,
+          "postings_decode_ms": 2.110,
+          "total_ms": 148.874
+        },
+        {
+          "run": 5,
+          "segment_open_ms": 150.316,
+          "dictionary_lookup_ms": 0.006,
+          "postings_decode_ms": 2.166,
+          "total_ms": 152.489
+        },
+        {
+          "run": 6,
+          "segment_open_ms": 146.456,
+          "dictionary_lookup_ms": 0.006,
+          "postings_decode_ms": 2.247,
+          "total_ms": 148.710
+        },
+        {
+          "run": 7,
+          "segment_open_ms": 150.652,
+          "dictionary_lookup_ms": 0.007,
+          "postings_decode_ms": 2.276,
+          "total_ms": 152.936
+        },
+        {
+          "run": 8,
+          "segment_open_ms": 147.024,
+          "dictionary_lookup_ms": 0.007,
+          "postings_decode_ms": 2.207,
+          "total_ms": 149.239
+        },
+        {
+          "run": 9,
+          "segment_open_ms": 144.264,
+          "dictionary_lookup_ms": 0.006,
+          "postings_decode_ms": 2.185,
+          "total_ms": 146.457
+        },
+        {
+          "run": 10,
+          "segment_open_ms": 154.758,
+          "dictionary_lookup_ms": 0.006,
+          "postings_decode_ms": 2.159,
+          "total_ms": 156.924
+        }
+      ]
+    },
+    {
+      "name": "warm_reused_common_term",
+      "term": "the",
+      "classification": "common",
+      "segment_access": "reused",
+      "matched_documents": 531382,
+      "dictionary_comparisons": 18,
+      "postings_bytes": 1062785,
+      "summary_ms": {
+        "total": {
+          "min": 2.271,
+          "median": 2.3615,
+          "p95": 2.884,
+          "max": 2.884,
+          "mean": 2.4307
+        }
+      },
+      "samples": [
+        {
+          "run": 1,
+          "dictionary_lookup_ms": 0.004,
+          "postings_decode_ms": 2.880,
+          "total_ms": 2.884
+        },
+        {
+          "run": 2,
+          "dictionary_lookup_ms": 0.007,
+          "postings_decode_ms": 2.263,
+          "total_ms": 2.271
+        },
+        {
+          "run": 3,
+          "dictionary_lookup_ms": 0.019,
+          "postings_decode_ms": 2.490,
+          "total_ms": 2.510
+        },
+        {
+          "run": 4,
+          "dictionary_lookup_ms": 0.008,
+          "postings_decode_ms": 2.266,
+          "total_ms": 2.274
+        },
+        {
+          "run": 5,
+          "dictionary_lookup_ms": 0.012,
+          "postings_decode_ms": 2.471,
+          "total_ms": 2.485
+        },
+        {
+          "run": 6,
+          "dictionary_lookup_ms": 0.013,
+          "postings_decode_ms": 2.324,
+          "total_ms": 2.338
+        },
+        {
+          "run": 7,
+          "dictionary_lookup_ms": 0.007,
+          "postings_decode_ms": 2.377,
+          "total_ms": 2.385
+        },
+        {
+          "run": 8,
+          "dictionary_lookup_ms": 0.034,
+          "postings_decode_ms": 2.522,
+          "total_ms": 2.558
+        },
+        {
+          "run": 9,
+          "dictionary_lookup_ms": 0.002,
+          "postings_decode_ms": 2.276,
+          "total_ms": 2.278
+        },
+        {
+          "run": 10,
+          "dictionary_lookup_ms": 0.005,
+          "postings_decode_ms": 2.318,
+          "total_ms": 2.324
+        }
+      ]
+    },
+    {
+      "name": "warm_reused_medium_term",
+      "term": "computer",
+      "classification": "medium",
+      "segment_access": "reused",
+      "matched_documents": 3456,
+      "dictionary_comparisons": 16,
+      "postings_bytes": 8482,
+      "summary_ms": {
+        "total": {
+          "min": 0.011,
+          "median": 0.014,
+          "p95": 0.034,
+          "max": 0.034,
+          "mean": 0.0163
+        }
+      },
+      "samples": [
+        {
+          "run": 1,
+          "dictionary_lookup_ms": 0.004,
+          "postings_decode_ms": 0.030,
+          "total_ms": 0.034
+        },
+        {
+          "run": 2,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.017,
+          "total_ms": 0.017
+        },
+        {
+          "run": 3,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.013,
+          "total_ms": 0.013
+        },
+        {
+          "run": 4,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.011,
+          "total_ms": 0.012
+        },
+        {
+          "run": 5,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.018,
+          "total_ms": 0.019
+        },
+        {
+          "run": 6,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.018,
+          "total_ms": 0.019
+        },
+        {
+          "run": 7,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.014,
+          "total_ms": 0.015
+        },
+        {
+          "run": 8,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.011,
+          "total_ms": 0.012
+        },
+        {
+          "run": 9,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.011,
+          "total_ms": 0.011
+        },
+        {
+          "run": 10,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.011,
+          "total_ms": 0.011
+        }
+      ]
+    },
+    {
+      "name": "warm_reused_rare_term",
+      "term": "rust",
+      "classification": "rare",
+      "segment_access": "reused",
+      "matched_documents": 58,
+      "dictionary_comparisons": 19,
+      "postings_bytes": 183,
+      "summary_ms": {
+        "total": {
+          "min": 0.001,
+          "median": 0.001,
+          "p95": 0.004,
+          "max": 0.004,
+          "mean": 0.0013
+        }
+      },
+      "samples": [
+        {
+          "run": 1,
+          "dictionary_lookup_ms": 0.003,
+          "postings_decode_ms": 0.001,
+          "total_ms": 0.004
+        },
+        {
+          "run": 2,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.001,
+          "total_ms": 0.001
+        },
+        {
+          "run": 3,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 4,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 5,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 6,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 7,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 8,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 9,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 10,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        }
+      ]
+    },
+    {
+      "name": "warm_reused_missing_term",
+      "term": "termthatcannotexist123456789",
+      "classification": "missing",
+      "segment_access": "reused",
+      "matched_documents": 0,
+      "dictionary_comparisons": 19,
+      "postings_bytes": 0,
+      "summary_ms": {
+        "total": {
+          "min": 0.001,
+          "median": 0.001,
+          "p95": 0.002,
+          "max": 0.002,
+          "mean": 0.0011
+        }
+      },
+      "samples": [
+        {
+          "run": 1,
+          "dictionary_lookup_ms": 0.002,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.002
+        },
+        {
+          "run": 2,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 3,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 4,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 5,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 6,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 7,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 8,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 9,
+          "dictionary_lookup_ms": 0.000,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        },
+        {
+          "run": 10,
+          "dictionary_lookup_ms": 0.001,
+          "postings_decode_ms": 0.000,
+          "total_ms": 0.001
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "The filesystem cache was not explicitly cleared, so fresh-open results are not cold-disk measurements.",
+    "Reported CLI durations are rounded to 0.001 ms; rare and missing-term measurements are near this reporting resolution.",
+    "Lookup execution materializes decoded postings into a Vec, so postings decode duration includes result collection.",
+    "The working tree contained uncommitted observability changes when the release binary was built."
+  ]
+}

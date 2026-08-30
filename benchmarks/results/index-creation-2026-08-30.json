@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-30",
+  "source": "user-reported run",
+  "corpus": "AllCombined.txt",
+  "stats": {
+    "input_bytes": 172657388,
+    "token_count": 30419760,
+    "segment_bytes": 71721865,
+    "validation_duration_ms": 642.216,
+    "indexing_duration_ms": 4488.785,
+    "finalization_duration_ms": 186.803,
+    "segment_write_duration_ms": 220.940,
+    "total_duration_ms": 5539.029
+  }
+}

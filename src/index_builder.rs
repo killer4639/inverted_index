@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader};
 pub struct IndexBuilder {
     postings: HashMap<String, Vec<Posting>>,
     next_document_id: DocumentId,
+    token_count: u64,
 }
 
 impl IndexBuilder {
@@ -14,6 +15,7 @@ impl IndexBuilder {
         Self {
             postings: HashMap::new(),
             next_document_id: 0,
+            token_count: 0,
         }
     }
 
@@ -30,7 +32,15 @@ impl IndexBuilder {
             let mut term_frequencies = HashMap::<String, TermFrequency>::new();
 
             for token in DocumentTokenizer::new(&line) {
-                *term_frequencies.entry(token.to_owned()).or_default() += 1;
+                self.token_count = self
+                    .token_count
+                    .checked_add(1)
+                    .ok_or_else(|| "token count exceeds u64".to_owned())?;
+
+                let term_frequency = term_frequencies.entry(token.to_owned()).or_default();
+                *term_frequency = term_frequency
+                    .checked_add(1)
+                    .ok_or_else(|| format!("term '{token}' frequency exceeds u32"))?;
             }
 
             for (term, term_frequency) in term_frequencies {
@@ -44,6 +54,10 @@ impl IndexBuilder {
         }
 
         Ok(())
+    }
+
+    pub fn token_count(&self) -> u64 {
+        self.token_count
     }
 
     pub fn finalize(self) -> Result<InvertedIndex, String> {
@@ -128,6 +142,7 @@ mod tests {
         let mut builder = IndexBuilder::new();
         builder.create_index(path.to_str().unwrap()).unwrap();
 
+        assert_eq!(builder.token_count(), 3);
         let index = builder.finalize().unwrap();
 
         assert_eq!(
@@ -148,6 +163,7 @@ mod tests {
         builder.create_index(first.to_str().unwrap()).unwrap();
         builder.create_index(second.to_str().unwrap()).unwrap();
 
+        assert_eq!(builder.token_count(), 6);
         let index = builder.finalize().unwrap();
 
         assert_eq!(

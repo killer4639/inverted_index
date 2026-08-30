@@ -88,6 +88,10 @@ impl<'a> PostingsDecoder<'a> {
         self.remaining_postings
     }
 
+    pub fn remaining_bytes(&self) -> usize {
+        self.remaining_bytes.len()
+    }
+
     fn fail(&mut self, error: DecodeError) -> Option<Result<Posting, DecodeError>> {
         self.finished = true;
         Some(Err(error))

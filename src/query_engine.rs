@@ -7,6 +7,11 @@ pub struct QueryEngine {
     segment_reader: SegmentReader,
 }
 
+pub struct TermQueryResult<'a> {
+    pub postings: Option<PostingsDecoder<'a>>,
+    pub dictionary_comparisons: u32,
+}
+
 impl QueryEngine {
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
         Ok(Self {
@@ -15,6 +20,10 @@ impl QueryEngine {
     }
 
     pub fn query_term(&self, term: &str) -> io::Result<Option<PostingsDecoder<'_>>> {
+        Ok(self.query_term_with_stats(term)?.postings)
+    }
+
+    pub fn query_term_with_stats(&self, term: &str) -> io::Result<TermQueryResult<'_>> {
         if term.is_empty()
             || !term
                 .chars()
@@ -27,19 +36,27 @@ impl QueryEngine {
         }
 
         if self.segment_reader.term_count() == 0 {
-            return Ok(None);
+            return Ok(TermQueryResult {
+                postings: None,
+                dictionary_comparisons: 0,
+            });
         }
 
         let mut first_term_idx: u32 = 0;
         let mut last_term_idx: u32 = self.segment_reader.term_count();
+        let mut dictionary_comparisons = 0;
 
         while first_term_idx < last_term_idx {
             let mid = first_term_idx + (last_term_idx - first_term_idx) / 2;
             let mid_term = self.segment_reader.get_term(mid)?;
+            dictionary_comparisons += 1;
 
             if mid_term == term {
                 let decoder = self.segment_reader.get_postings(mid)?;
-                return Ok(Some(decoder));
+                return Ok(TermQueryResult {
+                    postings: Some(decoder),
+                    dictionary_comparisons,
+                });
             } else if mid_term < term {
                 first_term_idx = mid + 1;
             } else {
@@ -47,7 +64,18 @@ impl QueryEngine {
             }
         }
 
-        Ok(None)
+        Ok(TermQueryResult {
+            postings: None,
+            dictionary_comparisons,
+        })
+    }
+
+    pub fn document_count(&self) -> u32 {
+        self.segment_reader.document_count()
+    }
+
+    pub fn term_count(&self) -> u32 {
+        self.segment_reader.term_count()
     }
 }
 
@@ -132,6 +160,19 @@ mod tests {
         assert_eq!(decoder.remaining_postings(), 2);
         assert_eq!(decoder.next(), Some(Ok(posting(0, 2))));
         assert_eq!(decoder.remaining_postings(), 1);
+    }
+
+    #[test]
+    fn query_term_reports_dictionary_comparisons() {
+        let engine = QueryEngine::new(test_segment_path()).unwrap();
+
+        let found = engine.query_term_with_stats("rust").unwrap();
+        assert!(found.postings.is_some());
+        assert!(found.dictionary_comparisons > 0);
+
+        let missing = engine.query_term_with_stats("missing").unwrap();
+        assert!(missing.postings.is_none());
+        assert!(missing.dictionary_comparisons > 0);
     }
 
     #[test]

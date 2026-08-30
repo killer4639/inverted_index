@@ -2,6 +2,9 @@
 
 Last updated: **2026-08-27**
 
+The current short-term execution plan is maintained in
+[immediate-next-steps.md](immediate-next-steps.md).
+
 ## North star
 
 Evolve the current immutable inverted-index prototype into a single-node,
