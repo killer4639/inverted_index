@@ -36,7 +36,7 @@ The repository already has a useful storage-format baseline:
 - memory-mapped reads;
 - binary-search term lookup;
 - lazy postings decoding;
-- format versioning, structural validation, and CRC32 corruption detection.
+- format versioning, safe layout parsing, and CRC32 corruption detection.
 
 The current engine deliberately lacks multiple segments, stable global document
 identity, writes, deletes, positions, scoring, stored fields, compaction, and

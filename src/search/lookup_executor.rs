@@ -1,6 +1,6 @@
-use crate::inverted_index::Posting;
-use crate::lookup_stats::{LookupSegmentStats, LookupStats, LookupTimings, TermLookupStats};
-use crate::query_engine::QueryEngine;
+use crate::model::Posting;
+use crate::search::query_engine::QueryEngine;
+use crate::search::stats::{LookupSegmentStats, LookupStats, LookupTimings, TermLookupStats};
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,12 @@ pub struct LookupResult {
 
 pub struct LookupExecutor {
     open_segment: Option<OpenSegment>,
+}
+
+impl Default for LookupExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 struct OpenSegment {
@@ -106,42 +112,24 @@ impl LookupExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index_codec;
-    use crate::inverted_index::InvertedIndex;
-    use std::collections::BTreeMap;
+    use crate::indexing::create_index;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
     fn write_segment() -> std::path::PathBuf {
         let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let corpus_path = std::env::temp_dir().join(format!(
+            "lookup-executor-corpus-{}-{id}.txt",
+            std::process::id()
+        ));
         let path = std::env::temp_dir().join(format!(
             "lookup-executor-segment-{}-{id}.idx",
             std::process::id()
         ));
-        let mut postings = BTreeMap::new();
-        postings.insert(
-            "rust".to_owned(),
-            vec![
-                Posting {
-                    document_id: 0,
-                    term_frequency: 2,
-                },
-                Posting {
-                    document_id: 2,
-                    term_frequency: 1,
-                },
-            ],
-        );
-        postings.insert(
-            "search".to_owned(),
-            vec![Posting {
-                document_id: 1,
-                term_frequency: 1,
-            }],
-        );
-        let index = InvertedIndex::from_finalized_postings(postings, 3);
-        index_codec::encode(&path, &index).unwrap();
+        fs::write(&corpus_path, "rust rust\nsearch\nrust\n").unwrap();
+        create_index(corpus_path.to_str().unwrap(), path.to_str().unwrap()).unwrap();
+        fs::remove_file(corpus_path).unwrap();
         path
     }
 

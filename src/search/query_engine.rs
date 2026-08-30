@@ -1,5 +1,5 @@
-use crate::postings_codec::PostingsDecoder;
-use crate::segment_reader::SegmentReader;
+use crate::storage::postings::PostingsDecoder;
+use crate::storage::segment_reader::SegmentReader;
 use std::io;
 use std::path::Path;
 
@@ -82,8 +82,8 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index_codec;
-    use crate::inverted_index::{InvertedIndex, Posting};
+    use crate::model::{InvertedIndex, Posting};
+    use crate::storage::segment_writer;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -95,16 +95,15 @@ mod tests {
     static TEST_SEGMENT: OnceLock<()> = OnceLock::new();
 
     fn test_segment_path() -> PathBuf {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("data")
-            .join("test_segment.idx");
+        let path =
+            std::env::temp_dir().join(format!("query-test-segment-{}.idx", std::process::id()));
         TEST_SEGMENT.get_or_init(|| {
             if !path.exists() {
                 let mut postings = BTreeMap::new();
                 postings.insert("rust".to_owned(), vec![posting(0, 2), posting(3, 1)]);
                 postings.insert("search".to_owned(), vec![posting(1, 1)]);
                 let index = InvertedIndex::from_finalized_postings(postings, 4);
-                index_codec::encode(&path, &index).expect("write data/test_segment.idx");
+                segment_writer::encode(&path, &index).expect("write data/test_segment.idx");
             }
         });
         path
@@ -124,7 +123,7 @@ mod tests {
             std::process::id()
         ));
         let index = InvertedIndex::from_finalized_postings(BTreeMap::new(), 0);
-        index_codec::encode(&path, &index).unwrap();
+        segment_writer::encode(&path, &index).unwrap();
         path
     }
 
@@ -208,12 +207,11 @@ mod tests {
     #[test]
     fn query_term_on_an_empty_segment_returns_no_postings() {
         let path = write_empty_segment();
-        let engine = QueryEngine::new(&path).unwrap();
-        let postings = engine.query_term("rust").unwrap();
-
-        assert!(postings.is_none());
-        drop(postings);
-        drop(engine);
+        {
+            let engine = QueryEngine::new(&path).unwrap();
+            let postings = engine.query_term("rust").unwrap();
+            assert!(postings.is_none());
+        }
         fs::remove_file(&path).unwrap();
     }
 }

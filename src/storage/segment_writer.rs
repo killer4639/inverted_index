@@ -1,5 +1,5 @@
-use crate::inverted_index::InvertedIndex;
-use crate::{postings_codec, varint};
+use crate::model::InvertedIndex;
+use crate::storage::{postings, varint};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -115,7 +115,7 @@ fn build_sections(index: &InvertedIndex) -> io::Result<SegmentSections> {
         let postings_offset = u64::try_from(postings.len())
             .map_err(|_| invalid_input("postings offset exceeds u64"))?;
         let postings_start = postings.len();
-        postings_codec::encode(term_postings, &mut postings).map_err(|error| {
+        postings::encode(term_postings, &mut postings).map_err(|error| {
             invalid_data(format!(
                 "cannot encode postings for term '{term}': {error:?}"
             ))
@@ -211,7 +211,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inverted_index::Posting;
+    use crate::model::Posting;
     use std::collections::BTreeMap;
 
     fn test_index() -> InvertedIndex {

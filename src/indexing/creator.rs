@@ -1,9 +1,9 @@
-use crate::doc_validator::validate_doc;
-use crate::index_builder::IndexBuilder;
-use crate::index_codec;
-use crate::index_creation_stats::{
+use crate::indexing::builder::IndexBuilder;
+use crate::indexing::document::validate_doc;
+use crate::indexing::stats::{
     CorpusStats, IndexCreationStats, IndexCreationTimings, IndexStats, SegmentStats,
 };
+use crate::storage::segment_writer;
 use std::fs;
 use std::time::Instant;
 
@@ -28,7 +28,7 @@ pub fn create_index(corpus_path: &str, segment_path: &str) -> Result<IndexCreati
     let finalization_duration = finalization_started.elapsed();
 
     let segment_write_started = Instant::now();
-    index_codec::encode(segment_path, &index)
+    segment_writer::encode(segment_path, &index)
         .map_err(|error| format!("failed to write segment: {error}"))?;
     let segment_write_duration = segment_write_started.elapsed();
 

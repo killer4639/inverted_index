@@ -1,24 +1,8 @@
-mod doc_validator;
-mod index_builder;
-mod index_codec;
-mod index_creation_stats;
-mod index_creator;
-mod inverted_index;
-mod lookup_executor;
-mod lookup_stats;
-mod postings_codec;
-mod query_engine;
-mod segment_reader;
-mod varint;
-
 use std::io::{self, Write};
 use std::process;
 use std::time::Duration;
 
-use crate::index_creation_stats::IndexCreationStats;
-use crate::index_creator::create_index;
-use crate::lookup_executor::LookupExecutor;
-use crate::lookup_stats::LookupStats;
+use inverted_index::{IndexCreationStats, LookupExecutor, LookupStats, create_index};
 
 const USAGE: &str = "usage:
   build <corpus> <segment>

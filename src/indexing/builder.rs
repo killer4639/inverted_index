@@ -1,5 +1,5 @@
-use crate::doc_validator::DocumentTokenizer;
-use crate::inverted_index::{DocumentId, InvertedIndex, Posting, TermFrequency};
+use crate::indexing::document::DocumentTokenizer;
+use crate::model::{DocumentId, InvertedIndex, Posting, TermFrequency};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};

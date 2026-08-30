@@ -135,9 +135,22 @@ corpus
   -> lazy postings decoder
 ```
 
-The reader validates the checksum, header, section boundaries, term ordering,
-term records, posting ranges, and encoded postings before exposing the mapped
-data for lookup.
+The source tree is grouped by responsibility:
+
+```text
+src/
+  indexing/   corpus validation, index construction, and creation statistics
+  storage/    integer/postings codecs and immutable segment I/O
+  search/     term lookup, lookup execution, and lookup statistics
+  model/      shared index and posting types
+  lib.rs      public library boundary
+  main.rs     interactive CLI only
+```
+
+The reader verifies the checksum and reads enough header layout information to
+access the mapped sections safely. Term records and postings are parsed and
+checked only when a lookup accesses them; semantic segment correctness is
+enforced by the writer.
 
 ## Segment format
 

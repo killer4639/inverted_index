@@ -1,8 +1,8 @@
-use crate::index_codec::{
-    CHECKSUM_LENGTH, FORMAT_VERSION, HEADER_LENGTH, MAGIC, TERM_OFFSET_LENGTH,
+use crate::storage::postings::PostingsDecoder;
+use crate::storage::segment_writer::{
+    CHECKSUM_LENGTH, FORMAT_VERSION, HEADER_LENGTH, TERM_OFFSET_LENGTH,
 };
-use crate::postings_codec::PostingsDecoder;
-use crate::varint;
+use crate::storage::varint;
 use memmap2::Mmap;
 use std::fs::File;
 use std::io;
@@ -32,7 +32,7 @@ impl SegmentReader {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = File::open(path)?;
         let mmap = map_immutable_segment(&file)?;
-        let layout = validate_segment(&mmap)?;
+        let layout = read_segment_layout(&mmap)?;
 
         Ok(Self {
             mmap,
@@ -56,7 +56,8 @@ impl SegmentReader {
         &self.mmap[self.term_offset_table.clone()]
     }
 
-    pub fn term_records(&self) -> &[u8] {
+    #[cfg(test)]
+    fn term_records(&self) -> &[u8] {
         &self.mmap[self.term_records.clone()]
     }
 
@@ -140,13 +141,13 @@ fn map_immutable_segment(file: &File) -> io::Result<Mmap> {
     unsafe { Mmap::map(file) }
 }
 
-fn validate_segment(bytes: &[u8]) -> io::Result<SegmentLayout> {
+fn read_segment_layout(bytes: &[u8]) -> io::Result<SegmentLayout> {
     if bytes.len() < HEADER_LENGTH + CHECKSUM_LENGTH {
         return Err(unexpected_eof("segment too small"));
     }
     validate_checksum(bytes)?;
 
-    let (document_count, term_count, postings_offset) = validate_header(&bytes[..HEADER_LENGTH])?;
+    let (document_count, term_count, postings_offset) = read_header(&bytes[..HEADER_LENGTH])?;
     let postings_start = usize_from_u64(
         postings_offset,
         "postings offset exceeds addressable memory",
@@ -164,20 +165,11 @@ fn validate_segment(bytes: &[u8]) -> io::Result<SegmentLayout> {
     let term_records_start = HEADER_LENGTH
         .checked_add(term_offset_table_length)
         .ok_or_else(|| invalid_data("term-record section overflow"))?;
-
     if term_records_start > postings_start {
         return Err(invalid_data("term records overlap the postings section"));
     }
 
     if term_count == 0 {
-        if postings_start != HEADER_LENGTH {
-            return Err(invalid_data(
-                "empty segment must place postings immediately after the header",
-            ));
-        }
-        if checksum_start != HEADER_LENGTH {
-            return Err(invalid_data("empty segment contains unexpected payload"));
-        }
         return Ok(SegmentLayout {
             document_count,
             term_count,
@@ -187,20 +179,6 @@ fn validate_segment(bytes: &[u8]) -> io::Result<SegmentLayout> {
         });
     }
 
-    let term_offsets = read_term_offsets(
-        &bytes[HEADER_LENGTH..term_records_start],
-        term_count_usize,
-        term_records_start,
-        postings_start,
-    )?;
-    let postings = &bytes[postings_start..checksum_start];
-    validate_terms_and_postings(
-        bytes,
-        &term_offsets,
-        postings_start,
-        document_count,
-        postings,
-    )?;
     Ok(SegmentLayout {
         document_count,
         term_count,
@@ -210,15 +188,7 @@ fn validate_segment(bytes: &[u8]) -> io::Result<SegmentLayout> {
     })
 }
 
-fn validate_header(input: &[u8]) -> io::Result<(u32, u32, u64)> {
-    if input.len() < HEADER_LENGTH {
-        return Err(unexpected_eof("truncated header"));
-    }
-
-    if input[..8] != MAGIC[..] {
-        return Err(invalid_data("invalid magic"));
-    }
-
+fn read_header(input: &[u8]) -> io::Result<(u32, u32, u64)> {
     let version = u16::from_le_bytes(input[8..10].try_into().unwrap());
     if version != FORMAT_VERSION {
         return Err(invalid_data("invalid format version"));
@@ -228,93 +198,6 @@ fn validate_header(input: &[u8]) -> io::Result<(u32, u32, u64)> {
     let term_count = u32::from_le_bytes(input[14..18].try_into().unwrap());
     let postings_offset = u64::from_le_bytes(input[18..26].try_into().unwrap());
     Ok((document_count, term_count, postings_offset))
-}
-
-fn read_term_offsets(
-    table: &[u8],
-    term_count: usize,
-    term_records_start: usize,
-    postings_start: usize,
-) -> io::Result<Vec<usize>> {
-    let mut offsets = Vec::with_capacity(term_count);
-    let mut index = 0;
-    while index < table.len() {
-        let offset =
-            u64::from_le_bytes(table[index..index + TERM_OFFSET_LENGTH].try_into().unwrap());
-        let offset = usize_from_u64(offset, "term-record offset exceeds addressable memory")?;
-        if offset < term_records_start || offset >= postings_start {
-            return Err(invalid_data(
-                "term-record offset is outside the term-record section",
-            ));
-        }
-        if let Some(&previous) = offsets.last() {
-            if offset <= previous {
-                return Err(invalid_data(
-                    "term-record offsets are not strictly increasing",
-                ));
-            }
-        }
-        offsets.push(offset);
-        index += TERM_OFFSET_LENGTH;
-    }
-
-    if offsets.len() != term_count {
-        return Err(invalid_data("term-offset table does not match term count"));
-    }
-    if offsets[0] != term_records_start {
-        return Err(invalid_data(
-            "first term-record offset must start at the term-record section",
-        ));
-    }
-
-    Ok(offsets)
-}
-
-fn validate_terms_and_postings(
-    bytes: &[u8],
-    term_offsets: &[usize],
-    postings_start: usize,
-    document_count: u32,
-    postings: &[u8],
-) -> io::Result<()> {
-    let mut previous_term: Option<&str> = None;
-    let mut posting_ranges = Vec::with_capacity(term_offsets.len());
-
-    for (index, &term_start) in term_offsets.iter().enumerate() {
-        let term_end = if index + 1 < term_offsets.len() {
-            term_offsets[index + 1]
-        } else {
-            postings_start
-        };
-
-        let (term, posting_range) =
-            validate_term_record(bytes, term_start, term_end, document_count, postings)?;
-
-        if let Some(previous) = previous_term {
-            if term <= previous {
-                return Err(invalid_data("terms are not strictly increasing"));
-            }
-        }
-        previous_term = Some(term);
-        posting_ranges.push(posting_range);
-    }
-
-    posting_ranges.sort_by_key(|range| range.0);
-    let mut expected = 0;
-    for (start, end) in posting_ranges {
-        if start != expected {
-            return Err(invalid_data("postings ranges are not contiguous"));
-        }
-        if end <= start {
-            return Err(invalid_data("postings range is empty"));
-        }
-        expected = end;
-    }
-    if expected != postings.len() {
-        return Err(invalid_data("postings section is not fully covered"));
-    }
-
-    Ok(())
 }
 
 struct ParsedTermRecord<'a> {
@@ -414,49 +297,6 @@ fn parse_term_record(bytes: &[u8], start: usize, end: usize) -> io::Result<Parse
     })
 }
 
-fn validate_term_record<'a>(
-    bytes: &'a [u8],
-    start: usize,
-    end: usize,
-    document_count: u32,
-    postings: &[u8],
-) -> io::Result<(&'a str, (usize, usize))> {
-    let record = parse_term_record(bytes, start, end)?;
-    let term = record.term;
-    let range_start = record.postings_start;
-    let range_end = record.postings_end;
-    if range_end > postings.len() {
-        return Err(invalid_data(format!(
-            "postings range for term '{term}' is outside the postings section"
-        )));
-    }
-
-    let posting_count = usize::try_from(record.document_frequency).map_err(|_| {
-        invalid_data(format!(
-            "document frequency for term '{term}' exceeds addressable memory"
-        ))
-    })?;
-    let decoder = PostingsDecoder::new(&postings[range_start..range_end], posting_count);
-    for result in decoder {
-        let posting = match result {
-            Ok(posting) => posting,
-            Err(error) => {
-                return Err(invalid_data(format!(
-                    "invalid postings for term '{term}': {error:?}"
-                )));
-            }
-        };
-        if posting.document_id >= document_count {
-            return Err(invalid_data(format!(
-                "term '{term}' contains unknown document ID {}",
-                posting.document_id
-            )));
-        }
-    }
-
-    Ok((term, (range_start, range_end)))
-}
-
 fn validate_checksum(bytes: &[u8]) -> io::Result<()> {
     let checksum_start = bytes.len() - CHECKSUM_LENGTH;
     let stored = u32::from_le_bytes(bytes[checksum_start..].try_into().unwrap());
@@ -486,8 +326,8 @@ fn unexpected_eof(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index_codec;
-    use crate::inverted_index::{InvertedIndex, Posting};
+    use crate::model::{InvertedIndex, Posting};
+    use crate::storage::segment_writer;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -525,7 +365,7 @@ mod tests {
         let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
         let path =
             std::env::temp_dir().join(format!("segment-reader-{}-{id}.idx", std::process::id()));
-        index_codec::encode(&path, index).unwrap();
+        segment_writer::encode(&path, index).unwrap();
         path
     }
 
@@ -567,22 +407,9 @@ mod tests {
     }
 
     #[test]
-    fn truncated_segment_is_rejected() {
-        let error = validate_segment(&[0; 10]).unwrap_err();
+    fn segment_too_small_for_header_and_checksum_is_rejected() {
+        let error = read_segment_layout(&[0; 10]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
-    }
-
-    #[test]
-    fn invalid_magic_is_rejected() {
-        let path = write_segment(&test_index());
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[0] = b'X';
-        replace_checksum(&mut bytes);
-
-        let error = validate_segment(&bytes).unwrap_err();
-        fs::remove_file(&path).unwrap();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
-        assert_eq!(error.to_string(), "invalid magic");
     }
 
     #[test]
@@ -592,7 +419,7 @@ mod tests {
         bytes[8..10].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
         replace_checksum(&mut bytes);
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let error = read_segment_layout(&bytes).unwrap_err();
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "invalid format version");
@@ -605,19 +432,19 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let error = read_segment_layout(&bytes).unwrap_err();
         fs::remove_file(&path).unwrap();
         assert_eq!(error.to_string(), "checksum mismatch");
     }
 
     #[test]
-    fn impossible_term_offset_table_is_rejected() {
+    fn term_offset_table_outside_the_file_is_rejected() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
         bytes[14..18].copy_from_slice(&u32::MAX.to_le_bytes());
         replace_checksum(&mut bytes);
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let error = read_segment_layout(&bytes).unwrap_err();
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(
@@ -627,150 +454,145 @@ mod tests {
     }
 
     #[test]
-    fn invalid_term_record_offset_is_rejected() {
+    fn postings_offset_past_the_checksum_is_rejected() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
-        bytes[26..34].copy_from_slice(&(HEADER_LENGTH as u64).to_le_bytes());
+        bytes[18..26].copy_from_slice(&u64::MAX.to_le_bytes());
         replace_checksum(&mut bytes);
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let error = read_segment_layout(&bytes).unwrap_err();
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
-        assert_eq!(
-            error.to_string(),
-            "term-record offset is outside the term-record section"
+        assert!(
+            error.to_string() == "postings offset exceeds addressable memory"
+                || error.to_string() == "postings offset is past the checksum"
         );
     }
 
     #[test]
-    fn truncated_term_record_is_rejected() {
+    fn invalid_term_record_offset_is_rejected_when_accessed() {
+        let path = write_segment(&test_index());
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[26..34].copy_from_slice(&(HEADER_LENGTH as u64).to_le_bytes());
+        replace_checksum(&mut bytes);
+        fs::write(&path, bytes).unwrap();
+
+        let reader = SegmentReader::open(&path).unwrap();
+        let error = reader.get_term(0).unwrap_err();
+        drop(reader);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "term-record range is invalid");
+    }
+
+    #[test]
+    fn truncated_term_record_is_rejected_when_accessed() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
         bytes[42] = 127;
         replace_checksum(&mut bytes);
+        fs::write(&path, bytes).unwrap();
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let reader = SegmentReader::open(&path).unwrap();
+        let error = reader.get_term(0).unwrap_err();
+        drop(reader);
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
         assert_eq!(error.to_string(), "truncated term bytes");
     }
 
     #[test]
-    fn invalid_utf8_term_is_rejected() {
+    fn invalid_utf8_term_is_rejected_when_accessed() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
         bytes[43] = 0xFF;
         replace_checksum(&mut bytes);
+        fs::write(&path, bytes).unwrap();
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let reader = SegmentReader::open(&path).unwrap();
+        let error = reader.get_term(0).unwrap_err();
+        drop(reader);
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "term is not valid UTF-8");
     }
 
     #[test]
-    fn zero_document_frequency_is_rejected() {
+    fn zero_document_frequency_is_rejected_when_accessed() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
         bytes[47] = 0;
         replace_checksum(&mut bytes);
+        fs::write(&path, bytes).unwrap();
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let reader = SegmentReader::open(&path).unwrap();
+        let error = match reader.get_postings(0) {
+            Ok(_) => panic!("zero document frequency should fail"),
+            Err(error) => error,
+        };
+        drop(reader);
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "term 'rust' has no postings");
     }
 
     #[test]
-    fn posting_range_outside_postings_section_is_rejected() {
+    fn posting_range_outside_postings_section_is_rejected_when_accessed() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
         bytes[56..64].copy_from_slice(&u64::MAX.to_le_bytes());
         replace_checksum(&mut bytes);
+        fs::write(&path, bytes).unwrap();
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let reader = SegmentReader::open(&path).unwrap();
+        let error = match reader.get_postings(0) {
+            Ok(_) => panic!("invalid postings range should fail"),
+            Err(error) => error,
+        };
+        drop(reader);
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert!(error.to_string().contains("postings"));
     }
 
     #[test]
-    fn unsorted_terms_are_rejected() {
+    fn term_order_is_not_eagerly_revalidated() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
         bytes[43..47].copy_from_slice(b"zzzz");
         replace_checksum(&mut bytes);
+        fs::write(&path, bytes).unwrap();
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let reader = SegmentReader::open(&path).unwrap();
+        assert_eq!(reader.get_term(0).unwrap(), "zzzz");
+        drop(reader);
         fs::remove_file(&path).unwrap();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
-        assert_eq!(error.to_string(), "terms are not strictly increasing");
     }
 
     #[test]
-    fn duplicate_terms_are_rejected() {
-        let mut postings = BTreeMap::new();
-        postings.insert(
-            "alpha".to_owned(),
-            vec![Posting {
-                document_id: 0,
-                term_frequency: 1,
-            }],
-        );
-        postings.insert(
-            "bravo".to_owned(),
-            vec![Posting {
-                document_id: 1,
-                term_frequency: 1,
-            }],
-        );
-        let index = InvertedIndex::from_finalized_postings(postings, 2);
-        let path = write_segment(&index);
-        let mut bytes = fs::read(&path).unwrap();
-        let second_term_offset = u64::from_le_bytes(bytes[34..42].try_into().unwrap()) as usize;
-        bytes[second_term_offset + 1..second_term_offset + 6].copy_from_slice(b"alpha");
-        replace_checksum(&mut bytes);
-
-        let error = validate_segment(&bytes).unwrap_err();
-        fs::remove_file(&path).unwrap();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
-        assert_eq!(error.to_string(), "terms are not strictly increasing");
-    }
-
-    #[test]
-    fn noncanonical_term_length_is_rejected() {
+    fn noncanonical_term_length_is_rejected_when_accessed() {
         let path = write_segment(&test_index());
         let mut bytes = fs::read(&path).unwrap();
         bytes[42] = 0x80;
         bytes[43] = 0;
         replace_checksum(&mut bytes);
+        fs::write(&path, bytes).unwrap();
 
-        let error = validate_segment(&bytes).unwrap_err();
+        let reader = SegmentReader::open(&path).unwrap();
+        let error = reader.get_term(0).unwrap_err();
+        drop(reader);
         fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert!(error.to_string().contains("NonCanonical"));
     }
 
     #[test]
-    fn unknown_document_id_is_rejected() {
-        let path = write_segment(&test_index());
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[10..14].copy_from_slice(&1u32.to_le_bytes());
-        replace_checksum(&mut bytes);
-
-        let error = validate_segment(&bytes).unwrap_err();
-        fs::remove_file(&path).unwrap();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
-        assert!(error.to_string().contains("unknown document ID"));
-    }
-
-    #[test]
-    fn truncated_segments_are_rejected_without_panicking() {
+    fn truncated_segments_fail_checksum_validation_without_panicking() {
         let path = write_segment(&test_index());
         let bytes = fs::read(&path).unwrap();
 
         for length in 0..bytes.len() {
-            let result = std::panic::catch_unwind(|| validate_segment(&bytes[..length]));
+            let result = std::panic::catch_unwind(|| read_segment_layout(&bytes[..length]));
             assert!(result.is_ok(), "validation panicked at length {length}");
             assert!(
                 result.unwrap().is_err(),
@@ -784,12 +606,11 @@ mod tests {
     static TEST_SEGMENT: OnceLock<()> = OnceLock::new();
 
     fn test_segment_path() -> PathBuf {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("data")
-            .join("test_segment.idx");
+        let path =
+            std::env::temp_dir().join(format!("reader-test-segment-{}.idx", std::process::id()));
         TEST_SEGMENT.get_or_init(|| {
             if !path.exists() {
-                index_codec::encode(&path, &test_index()).expect("write data/test_segment.idx");
+                segment_writer::encode(&path, &test_index()).expect("write data/test_segment.idx");
             }
         });
         path

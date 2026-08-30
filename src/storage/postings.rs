@@ -1,5 +1,5 @@
-use crate::inverted_index::{DocumentId, Posting};
-use crate::varint;
+use crate::model::{DocumentId, Posting};
+use crate::storage::varint;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum EncodeError {

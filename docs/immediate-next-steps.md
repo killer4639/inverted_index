@@ -64,6 +64,9 @@ write batches
     -> queries merging results across visible segments
 ```
 
+The detailed implementation plan is maintained in
+[multi-segment-reads-implementation-plan.md](multi-segment-reads-implementation-plan.md).
+
 Only after this milestone should the engine gain a memtable and WAL:
 
 - insert: append to WAL and apply to memtable;
