@@ -1,3 +1,5 @@
+pub mod document_address;
+
 use std::collections::BTreeMap;
 
 pub type DocumentId = u32;
