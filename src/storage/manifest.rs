@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use std::path::{Component, Path};
 
 pub const MANIFEST_FILE_PREFIX: &str = "manifest-";
+pub const MANIFEST_FILE_SUFFIX: &str = ".bin";
 pub const SEGMENT_FILE_PREFIX: &str = "segment-";
+pub const SEGMENT_FILE_SUFFIX: &str = ".idx";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestError {
@@ -22,6 +24,7 @@ pub struct Manifest {
     segments: Vec<SegmentMetadata>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct SegmentMetadata {
     pub id: SegmentId,
     pub file_name: String,
@@ -73,6 +76,10 @@ impl Manifest {
 
     pub fn segments(&self) -> &[SegmentMetadata] {
         &self.segments
+    }
+
+    pub fn into_segments(self) -> Vec<SegmentMetadata> {
+        self.segments
     }
 
     pub fn segment_count(&self) -> usize {

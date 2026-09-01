@@ -24,16 +24,7 @@ impl QueryEngine {
     }
 
     pub fn query_term_with_stats(&self, term: &str) -> io::Result<TermQueryResult<'_>> {
-        if term.is_empty()
-            || !term
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "query must be one ASCII-alphanumeric word",
-            ));
-        }
+        validate_query_term(term)?;
 
         if self.segment_reader.term_count() == 0 {
             return Ok(TermQueryResult {
@@ -77,6 +68,21 @@ impl QueryEngine {
     pub fn term_count(&self) -> u32 {
         self.segment_reader.term_count()
     }
+}
+
+pub(crate) fn validate_query_term(term: &str) -> io::Result<()> {
+    if term.is_empty()
+        || !term
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "query must be one ASCII-alphanumeric word",
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

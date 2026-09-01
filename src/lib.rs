@@ -9,6 +9,11 @@ pub use indexing::{
 pub use model::document_address::{AddressedPosting, DocumentAddress, SegmentId};
 pub use model::{DocumentId, InvertedIndex, Posting, TermFrequency};
 pub use search::{
-    LookupExecutor, LookupResult, LookupSegmentStats, LookupStats, LookupTimings, QueryEngine,
-    TermLookupStats, TermQueryResult,
+    LookupExecutor, LookupResult, LookupSegmentStats, LookupStats, LookupTimings,
+    MultiSegmentDictionaryStats, MultiSegmentPostings, MultiSegmentQueryEngine,
+    MultiSegmentTermQueryResult, QueryEngine, SegmentDecodeError, TermLookupStats, TermQueryResult,
 };
+pub use storage::index_storage::{CounterError, IndexStorage, IndexStorageError};
+pub use storage::manifest::{Manifest, ManifestError, SegmentMetadata};
+pub use storage::postings::DecodeError;
+pub use storage::varint::DecodeError as VarintDecodeError;

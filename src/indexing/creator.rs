@@ -5,9 +5,14 @@ use crate::indexing::stats::{
 };
 use crate::storage::segment_writer;
 use std::fs;
+use std::path::Path;
 use std::time::Instant;
 
-pub fn create_index(corpus_path: &str, segment_path: &str) -> Result<IndexCreationStats, String> {
+pub fn create_index(
+    corpus_path: &str,
+    segment_path: impl AsRef<Path>,
+) -> Result<IndexCreationStats, String> {
+    let segment_path = segment_path.as_ref();
     let total_started = Instant::now();
     let input_bytes = fs::metadata(corpus_path)
         .map_err(|error| format!("failed to read document file metadata: {error}"))?

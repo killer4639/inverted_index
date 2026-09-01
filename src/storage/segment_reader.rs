@@ -52,6 +52,15 @@ impl SegmentReader {
         self.term_count
     }
 
+    pub fn checksum(&self) -> u32 {
+        let checksum_start = self.mmap.len() - CHECKSUM_LENGTH;
+        u32::from_le_bytes(
+            self.mmap[checksum_start..]
+                .try_into()
+                .expect("validated segment checksum has four bytes"),
+        )
+    }
+
     pub fn term_offset_table(&self) -> &[u8] {
         &self.mmap[self.term_offset_table.clone()]
     }
