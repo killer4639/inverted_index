@@ -9,8 +9,8 @@ pub use indexing::{
 pub use model::document_address::{AddressedPosting, DocumentAddress, SegmentId};
 pub use model::{DocumentId, InvertedIndex, Posting, TermFrequency};
 pub use search::{
-    LookupExecutor, LookupResult, LookupSegmentStats, LookupStats, LookupTimings,
-    MultiSegmentPostings, QueryEngine, SegmentDecodeError, TermLookupStats, TermQueryResult,
+    LookupExecutor, LookupResult, LookupStats, LookupTimings, MultiSegmentPostings, QueryEngine,
+    SegmentDecodeError, SnapshotStats, TermLookupStats, TermQueryResult,
 };
 pub use storage::index_snapshot::{IndexSnapshot, MultiSegmentDictionaryStats};
 pub use storage::index_storage::{CounterError, IndexStorage, IndexStorageError};

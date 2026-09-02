@@ -1,9 +1,9 @@
 use std::io::{self, Write};
 use std::process;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use inverted_index::{
-    IndexCreationStats, IndexSnapshot, IndexStorage, MultiSegmentDictionaryStats, create_index,
+    IndexCreationStats, IndexSnapshot, IndexStorage, LookupExecutor, LookupStats, create_index,
     encode_manifest,
 };
 
@@ -28,6 +28,7 @@ fn main() {
             process::exit(1);
         }
     };
+    let lookup_executor = LookupExecutor::new();
 
     loop {
         print!("> ");
@@ -51,8 +52,8 @@ fn main() {
             ["build", corpus_path] => {
                 build_segment(corpus_path, &index_storage, &mut index_snapshot)
             }
-            ["lookup", term] => lookup_term(term, &index_snapshot, true),
-            ["lookup-stats", term] => lookup_term(term, &index_snapshot, false),
+            ["lookup", term] => lookup_term(term, &index_snapshot, &lookup_executor, true),
+            ["lookup-stats", term] => lookup_term(term, &index_snapshot, &lookup_executor, false),
             [] => continue,
             _ => {
                 eprintln!("{USAGE}");
@@ -139,33 +140,14 @@ fn duration_milliseconds(duration: Duration) -> f64 {
 fn lookup_term(
     term: &str,
     index_snapshot: &IndexSnapshot,
+    lookup_executor: &LookupExecutor,
     print_postings: bool,
 ) -> Result<(), String> {
-    let total_started = Instant::now();
-    let dictionary_lookup_started = Instant::now();
-    let query_result = index_snapshot
-        .query_term_with_stats(term)
-        .map_err(|error| format!("failed to query index: {error}"))?;
-    let dictionary_lookup_duration = dictionary_lookup_started.elapsed();
-    let dictionary_stats = query_result.dictionary_stats;
+    let lookup_result = lookup_executor.lookup(index_snapshot, term)?;
 
-    let postings_decode_started = Instant::now();
-    let mut postings = Vec::new();
-    for posting in query_result.postings {
-        let posting = posting.map_err(|error| {
-            format!(
-                "failed to decode postings in segment {}: {:?}",
-                error.segment_id, error.source
-            )
-        })?;
-        postings.push(posting);
-    }
-    let postings_decode_duration = postings_decode_started.elapsed();
-    let total_duration = total_started.elapsed();
-
-    println!("{} matching document(s)", postings.len());
+    println!("{} matching document(s)", lookup_result.postings.len());
     if print_postings {
-        for posting in &postings {
+        for posting in &lookup_result.postings {
             println!(
                 "segment {}, document {}: frequency {}",
                 posting.address.segment_id,
@@ -175,63 +157,53 @@ fn lookup_term(
         }
     }
 
-    print_lookup_stats(
-        index_snapshot,
-        dictionary_stats,
-        dictionary_lookup_duration,
-        postings_decode_duration,
-        total_duration,
-        postings.len(),
-    );
+    print_lookup_stats(&lookup_result.stats);
     Ok(())
 }
 
-fn print_lookup_stats(
-    index_snapshot: &IndexSnapshot,
-    dictionary_stats: MultiSegmentDictionaryStats,
-    dictionary_lookup_duration: Duration,
-    postings_decode_duration: Duration,
-    total_duration: Duration,
-    matched_document_count: usize,
-) {
+fn print_lookup_stats(stats: &LookupStats) {
     println!("lookup statistics:");
-    println!("  indexed segments: {}", index_snapshot.segment_count());
-    println!("  segment bytes: {}", index_snapshot.total_segment_bytes());
+    match stats.snapshot.manifest_generation {
+        Some(generation) => println!("  manifest generation: {generation}"),
+        None => println!("  manifest generation: none"),
+    }
+    println!("  indexed segments: {}", stats.snapshot.segment_count);
+    println!("  segment bytes: {}", stats.snapshot.total_segment_bytes);
     println!(
         "  indexed documents: {}",
-        index_snapshot.total_document_count()
+        stats.snapshot.total_document_count
     );
-    println!("  term entries: {}", index_snapshot.total_term_entries());
+    println!("  term entries: {}", stats.snapshot.total_term_entries);
     println!(
         "  segments searched: {}",
-        dictionary_stats.searched_segment_count
+        stats.query.searched_segment_count
     );
     println!(
         "  matching segments: {}",
-        dictionary_stats.matching_segment_count
+        stats.query.matching_segment_count
     );
-    println!(
-        "  term found: {}",
-        dictionary_stats.matching_segment_count > 0
-    );
+    println!("  term found: {}", stats.query.term_found());
     println!(
         "  dictionary comparisons: {}",
-        dictionary_stats.dictionary_comparisons
+        stats.query.dictionary_comparisons
     );
-    println!("  matched documents: {matched_document_count}");
     println!(
-        "  postings bytes: {}",
-        dictionary_stats.encoded_postings_bytes
+        "  matched documents: {}",
+        stats.query.matched_document_count
     );
+    println!("  postings bytes: {}", stats.query.encoded_postings_bytes);
     println!(
         "  dictionary lookup: {:.3} ms",
-        duration_milliseconds(dictionary_lookup_duration)
+        duration_milliseconds(stats.timings.dictionary_lookup_duration)
     );
     println!(
         "  postings decode: {:.3} ms",
-        duration_milliseconds(postings_decode_duration)
+        duration_milliseconds(stats.timings.postings_decode_duration)
     );
-    println!("  total: {:.3} ms", duration_milliseconds(total_duration));
+    println!(
+        "  total: {:.3} ms",
+        duration_milliseconds(stats.timings.total_duration)
+    );
 }
 
 fn open_index_snapshot(index_storage: &IndexStorage) -> Result<IndexSnapshot, String> {

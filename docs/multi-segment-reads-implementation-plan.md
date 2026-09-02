@@ -671,26 +671,34 @@ identifier.
 
 Measure the physical work introduced by segment fan-out.
 
-### New file: `src/search/multi_segment_stats.rs`
+### Structured lookup boundary
 
-Group statistics as:
+Rewrite the existing lookup observability types instead of introducing a
+parallel multi-segment hierarchy:
 
 ```rust
-pub struct MultiSegmentLookupStats {
+pub struct LookupStats {
     pub snapshot: SnapshotStats,
-    pub query: MultiSegmentTermStats,
-    pub timings: MultiSegmentLookupTimings,
+    pub query: TermLookupStats,
+    pub timings: LookupTimings,
 }
 ```
+
+`LookupExecutor` is stateless. It accepts an already-open `IndexSnapshot`,
+performs the lazy query, materializes the results for the CLI, and returns one
+`LookupResult` containing both postings and statistics.
 
 ### Snapshot statistics
 
 - manifest generation;
-- snapshot opened or reused;
 - visible segment count;
 - total segment bytes;
 - total documents;
 - total per-segment term entries.
+
+Snapshot construction is not part of lookup latency. The CLI opens or refreshes
+the snapshot separately and reuses it across lookups, so lookup statistics must
+not contain synthetic open/reuse flags or zero-valued open timings.
 
 ### Query work
 
@@ -699,35 +707,31 @@ pub struct MultiSegmentLookupStats {
 - aggregate dictionary comparisons;
 - matched documents;
 - encoded postings bytes;
-- postings decoded;
-- per-segment matches and bytes for diagnostic output.
 
-Do not use segment IDs as future metrics labels. Per-segment details belong in
-the per-operation report, not an unbounded global metric series.
+The matched-document count is also the number of successfully decoded postings;
+do not store the same count twice.
 
 ### Timings
 
-- manifest discovery and decoding;
-- segment opening and checksum verification;
 - dictionary lookup across all segments;
 - postings decoding and materialization;
 - total lookup.
 
-The current sequential implementation should make timing boundaries explicit.
-Do not add parallel execution in this phase.
+Keep timing assembly inside `LookupExecutor`, not in `main.rs`. The current
+sequential implementation should make timing boundaries explicit. Do not add
+parallel execution in this phase.
 
 ### Tests
 
 - aggregate counts equal per-segment sums;
 - missing terms still report all segments considered;
-- reused snapshots report zero open time;
 - empty indexes report zero query work;
-- failed opens do not produce success-shaped reports.
+- decode failures do not produce success-shaped reports.
 
 ### Success criteria
 
 - A lookup explains both latency and the amount of segment fan-out that caused
-  it.
+  it without duplicating instrumentation in the CLI.
 
 ---
 

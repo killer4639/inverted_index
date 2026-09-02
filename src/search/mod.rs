@@ -6,4 +6,4 @@ mod stats;
 pub use lookup_executor::{LookupExecutor, LookupResult};
 pub use multi_segment_postings::{MultiSegmentPostings, SegmentDecodeError};
 pub use query_engine::{QueryEngine, TermQueryResult};
-pub use stats::{LookupSegmentStats, LookupStats, LookupTimings, TermLookupStats};
+pub use stats::{LookupStats, LookupTimings, SnapshotStats, TermLookupStats};

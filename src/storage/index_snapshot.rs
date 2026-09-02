@@ -75,7 +75,7 @@ impl IndexSnapshot {
         }
     }
 
-    fn from_manifest(
+    pub(crate) fn from_manifest(
         generation: u64,
         manifest: &Manifest,
         segment_directory: &Path,

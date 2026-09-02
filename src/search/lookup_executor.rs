@@ -1,17 +1,14 @@
-use crate::model::Posting;
-use crate::search::query_engine::QueryEngine;
-use crate::search::stats::{LookupSegmentStats, LookupStats, LookupTimings, TermLookupStats};
-use std::fs;
-use std::time::{Duration, Instant};
+use crate::model::document_address::AddressedPosting;
+use crate::search::stats::{LookupStats, LookupTimings, SnapshotStats, TermLookupStats};
+use crate::storage::index_snapshot::IndexSnapshot;
+use std::time::Instant;
 
 pub struct LookupResult {
-    pub postings: Vec<Posting>,
+    pub postings: Vec<AddressedPosting>,
     pub stats: LookupStats,
 }
 
-pub struct LookupExecutor {
-    open_segment: Option<OpenSegment>,
-}
+pub struct LookupExecutor;
 
 impl Default for LookupExecutor {
     fn default() -> Self {
@@ -19,86 +16,53 @@ impl Default for LookupExecutor {
     }
 }
 
-struct OpenSegment {
-    path: String,
-    bytes: u64,
-    engine: QueryEngine,
-}
-
 impl LookupExecutor {
     pub fn new() -> Self {
-        Self { open_segment: None }
+        Self
     }
 
-    pub fn lookup(&mut self, segment_path: &str, term: &str) -> Result<LookupResult, String> {
+    pub fn lookup(
+        &self,
+        index_snapshot: &IndexSnapshot,
+        term: &str,
+    ) -> Result<LookupResult, String> {
         let total_started = Instant::now();
-        let should_open = match self.open_segment.as_ref() {
-            Some(open_segment) => open_segment.path != segment_path,
-            None => true,
-        };
-
-        let segment_open_duration = if should_open {
-            let segment_open_started = Instant::now();
-            let engine = QueryEngine::new(segment_path)
-                .map_err(|error| format!("failed to open segment: {error}"))?;
-            let bytes = fs::metadata(segment_path)
-                .map_err(|error| format!("failed to read segment metadata: {error}"))?
-                .len();
-
-            self.open_segment = Some(OpenSegment {
-                path: segment_path.to_owned(),
-                bytes,
-                engine,
-            });
-            segment_open_started.elapsed()
-        } else {
-            Duration::ZERO
-        };
-
-        let open_segment = self
-            .open_segment
-            .as_ref()
-            .ok_or_else(|| "segment is not open".to_owned())?;
-
         let dictionary_lookup_started = Instant::now();
-        let query_result = open_segment
-            .engine
+        let query_result = index_snapshot
             .query_term_with_stats(term)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("failed to query index: {error}"))?;
         let dictionary_lookup_duration = dictionary_lookup_started.elapsed();
+        let dictionary_stats = query_result.dictionary_stats;
 
-        let dictionary_comparisons = query_result.dictionary_comparisons;
-        let term_found = query_result.postings.is_some();
         let postings_decode_started = Instant::now();
         let mut postings = Vec::new();
-        let mut postings_bytes = 0;
-
-        if let Some(decoder) = query_result.postings {
-            postings_bytes = decoder.remaining_bytes();
-            postings.reserve(decoder.remaining_postings());
-
-            for result in decoder {
-                postings
-                    .push(result.map_err(|error| format!("failed to decode postings: {error:?}"))?);
-            }
+        for posting in query_result.postings {
+            let posting = posting.map_err(|error| {
+                format!(
+                    "failed to decode postings in segment {}: {:?}",
+                    error.segment_id, error.source
+                )
+            })?;
+            postings.push(posting);
         }
-
         let postings_decode_duration = postings_decode_started.elapsed();
+
         let stats = LookupStats {
-            segment: LookupSegmentStats {
-                opened_for_lookup: should_open,
-                segment_bytes: open_segment.bytes,
-                document_count: open_segment.engine.document_count(),
-                term_count: open_segment.engine.term_count(),
+            snapshot: SnapshotStats {
+                manifest_generation: index_snapshot.generation(),
+                segment_count: index_snapshot.segment_count(),
+                total_segment_bytes: index_snapshot.total_segment_bytes(),
+                total_document_count: index_snapshot.total_document_count(),
+                total_term_entries: index_snapshot.total_term_entries(),
             },
             query: TermLookupStats {
-                term_found,
-                dictionary_comparisons,
+                searched_segment_count: dictionary_stats.searched_segment_count,
+                matching_segment_count: dictionary_stats.matching_segment_count,
+                dictionary_comparisons: dictionary_stats.dictionary_comparisons,
                 matched_document_count: postings.len(),
-                postings_bytes,
+                encoded_postings_bytes: dictionary_stats.encoded_postings_bytes,
             },
             timings: LookupTimings {
-                segment_open_duration,
                 dictionary_lookup_duration,
                 postings_decode_duration,
                 total_duration: total_started.elapsed(),
@@ -112,50 +76,96 @@ impl LookupExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexing::create_index;
+    use crate::SegmentId;
+    use crate::model::{InvertedIndex, Posting};
+    use crate::storage::manifest::{
+        FILE_NUMBER_WIDTH, Manifest, SEGMENT_FILE_PREFIX, SEGMENT_FILE_SUFFIX, SegmentMetadata,
+    };
+    use crate::storage::segment_codec;
+    use crate::storage::segment_reader::SegmentReader;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn write_segment() -> std::path::PathBuf {
-        let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        let corpus_path = std::env::temp_dir().join(format!(
-            "lookup-executor-corpus-{}-{id}.txt",
-            std::process::id()
-        ));
-        let path = std::env::temp_dir().join(format!(
-            "lookup-executor-segment-{}-{id}.idx",
-            std::process::id()
-        ));
-        fs::write(&corpus_path, "rust rust\nsearch\nrust\n").unwrap();
-        create_index(corpus_path.to_str().unwrap(), path.to_str().unwrap()).unwrap();
-        fs::remove_file(corpus_path).unwrap();
-        path
-    }
+    static TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn reports_lookup_work_and_reuses_the_open_segment() {
-        let path = write_segment();
-        let path_text = path.to_str().unwrap();
-        let mut executor = LookupExecutor::new();
+    fn reports_snapshot_query_work_and_timings() {
+        let segment_directory = test_segment_directory();
+        let metadata = write_segment(&segment_directory);
+        let manifest = Manifest::new(vec![metadata]).unwrap();
+        let index_snapshot =
+            IndexSnapshot::from_manifest(7, &manifest, &segment_directory).unwrap();
+        let executor = LookupExecutor::new();
 
-        let first = executor.lookup(path_text, "rust").unwrap();
-        assert_eq!(first.postings.len(), 2);
-        assert!(first.stats.segment.opened_for_lookup);
-        assert_eq!(first.stats.segment.document_count, 3);
-        assert_eq!(first.stats.segment.term_count, 2);
-        assert!(first.stats.query.term_found);
-        assert!(first.stats.query.dictionary_comparisons > 0);
-        assert_eq!(first.stats.query.matched_document_count, 2);
-        assert!(first.stats.query.postings_bytes > 0);
+        let found = executor.lookup(&index_snapshot, "rust").unwrap();
+        assert_eq!(found.postings.len(), 2);
+        assert_eq!(found.stats.snapshot.manifest_generation, Some(7));
+        assert_eq!(found.stats.snapshot.segment_count, 1);
+        assert_eq!(found.stats.snapshot.total_document_count, 3);
+        assert_eq!(found.stats.snapshot.total_term_entries, 2);
+        assert!(found.stats.snapshot.total_segment_bytes > 0);
+        assert_eq!(found.stats.query.searched_segment_count, 1);
+        assert_eq!(found.stats.query.matching_segment_count, 1);
+        assert!(found.stats.query.dictionary_comparisons > 0);
+        assert_eq!(found.stats.query.matched_document_count, 2);
+        assert!(found.stats.query.encoded_postings_bytes > 0);
+        assert!(found.stats.query.term_found());
+        assert!(
+            found.stats.timings.total_duration
+                >= found.stats.timings.dictionary_lookup_duration
+                    + found.stats.timings.postings_decode_duration
+        );
 
-        let second = executor.lookup(path_text, "missing").unwrap();
-        assert!(!second.stats.segment.opened_for_lookup);
-        assert_eq!(second.stats.timings.segment_open_duration, Duration::ZERO);
-        assert!(!second.stats.query.term_found);
-        assert!(second.postings.is_empty());
-        assert_eq!(second.stats.query.postings_bytes, 0);
+        let missing = executor.lookup(&index_snapshot, "missing").unwrap();
+        assert!(missing.postings.is_empty());
+        assert_eq!(missing.stats.query.searched_segment_count, 1);
+        assert_eq!(missing.stats.query.matching_segment_count, 0);
+        assert_eq!(missing.stats.query.matched_document_count, 0);
+        assert_eq!(missing.stats.query.encoded_postings_bytes, 0);
+        assert!(!missing.stats.query.term_found());
 
-        fs::remove_file(path).unwrap();
+        drop(index_snapshot);
+        fs::remove_dir_all(segment_directory).unwrap();
+    }
+
+    fn test_segment_directory() -> PathBuf {
+        let id = TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+        let segment_directory =
+            std::env::temp_dir().join(format!("lookup-executor-index-{}-{id}", std::process::id()));
+        fs::create_dir(&segment_directory).unwrap();
+        segment_directory
+    }
+
+    fn write_segment(segment_directory: &Path) -> SegmentMetadata {
+        let segment_id = 1;
+        let file_name = format!(
+            "{SEGMENT_FILE_PREFIX}{segment_id:0width$}{SEGMENT_FILE_SUFFIX}",
+            width = FILE_NUMBER_WIDTH
+        );
+        let path = segment_directory.join(&file_name);
+        let mut postings = BTreeMap::new();
+        postings.insert("rust".to_owned(), vec![posting(0, 2), posting(2, 1)]);
+        postings.insert("search".to_owned(), vec![posting(1, 1)]);
+        let index = InvertedIndex::from_finalized_postings(postings, 3);
+        segment_codec::encode(&path, &index).unwrap();
+
+        let reader = SegmentReader::open(&path).unwrap();
+        SegmentMetadata {
+            id: SegmentId::new(segment_id).unwrap(),
+            file_name,
+            document_count: reader.document_count(),
+            term_count: reader.term_count(),
+            length_bytes: fs::metadata(path).unwrap().len(),
+            checksum: reader.checksum(),
+        }
+    }
+
+    fn posting(document_id: u32, term_frequency: u32) -> Posting {
+        Posting {
+            document_id,
+            term_frequency,
+        }
     }
 }
