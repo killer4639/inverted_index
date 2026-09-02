@@ -89,7 +89,7 @@ pub(crate) fn validate_query_term(term: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::model::{InvertedIndex, Posting};
-    use crate::storage::segment_writer;
+    use crate::storage::segment_codec;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -109,7 +109,7 @@ mod tests {
                 postings.insert("rust".to_owned(), vec![posting(0, 2), posting(3, 1)]);
                 postings.insert("search".to_owned(), vec![posting(1, 1)]);
                 let index = InvertedIndex::from_finalized_postings(postings, 4);
-                segment_writer::encode(&path, &index).expect("write data/test_segment.idx");
+                segment_codec::encode(&path, &index).expect("write data/test_segment.idx");
             }
         });
         path
@@ -129,7 +129,7 @@ mod tests {
             std::process::id()
         ));
         let index = InvertedIndex::from_finalized_postings(BTreeMap::new(), 0);
-        segment_writer::encode(&path, &index).unwrap();
+        segment_codec::encode(&path, &index).unwrap();
         path
     }
 

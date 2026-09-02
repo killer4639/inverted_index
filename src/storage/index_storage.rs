@@ -1,7 +1,7 @@
 use crate::SegmentId;
 use crate::storage::manifest::{
-    MANIFEST_FILE_PREFIX, MANIFEST_FILE_SUFFIX, Manifest, ManifestError, SEGMENT_FILE_PREFIX,
-    SEGMENT_FILE_SUFFIX, SegmentMetadata,
+    FILE_NUMBER_WIDTH, MANIFEST_FILE_PREFIX, MANIFEST_FILE_SUFFIX, Manifest, ManifestError,
+    SEGMENT_FILE_PREFIX, SEGMENT_FILE_SUFFIX, SegmentMetadata,
 };
 use crate::storage::segment_reader::SegmentReader;
 use std::error::Error;
@@ -79,12 +79,18 @@ impl IndexStorage {
     }
 
     pub fn manifest_file_path(&self, generation: u64) -> PathBuf {
-        let file_name = format!("{MANIFEST_FILE_PREFIX}{generation:016}{MANIFEST_FILE_SUFFIX}");
+        let file_name = format!(
+            "{MANIFEST_FILE_PREFIX}{generation:0width$}{MANIFEST_FILE_SUFFIX}",
+            width = FILE_NUMBER_WIDTH
+        );
         self.manifest_directory().join(file_name)
     }
 
     pub fn segment_file_path(&self, segment_id: u64) -> PathBuf {
-        let file_name = format!("{SEGMENT_FILE_PREFIX}{segment_id:016}{SEGMENT_FILE_SUFFIX}");
+        let file_name = format!(
+            "{SEGMENT_FILE_PREFIX}{segment_id:0width$}{SEGMENT_FILE_SUFFIX}",
+            width = FILE_NUMBER_WIDTH
+        );
         self.segment_directory().join(file_name)
     }
 

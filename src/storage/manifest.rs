@@ -6,6 +6,7 @@ pub const MANIFEST_FILE_PREFIX: &str = "manifest-";
 pub const MANIFEST_FILE_SUFFIX: &str = ".bin";
 pub const SEGMENT_FILE_PREFIX: &str = "segment-";
 pub const SEGMENT_FILE_SUFFIX: &str = ".idx";
+pub const FILE_NUMBER_WIDTH: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestError {
@@ -20,6 +21,7 @@ pub enum ManifestError {
     TotalTermEntriesOverflow,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Manifest {
     segments: Vec<SegmentMetadata>,
 }
@@ -36,42 +38,16 @@ pub struct SegmentMetadata {
 
 impl Manifest {
     pub fn new(segments: Vec<SegmentMetadata>) -> Result<Self, ManifestError> {
-        let mut file_names = HashSet::with_capacity(segments.len());
-        let mut previous_segment_id = None;
-        let mut total_document_count = 0_u64;
-        let mut total_segment_bytes = 0_u64;
-        let mut total_term_entries = 0_u64;
-
-        for segment in &segments {
-            if let Some(previous) = previous_segment_id {
-                if segment.id <= previous {
-                    return Err(ManifestError::SegmentIdsNotStrictlyIncreasing {
-                        previous,
-                        current: segment.id,
-                    });
-                }
-            }
-            previous_segment_id = Some(segment.id);
-
-            if !is_safe_file_name(&segment.file_name) {
-                return Err(ManifestError::UnsafeFileName(segment.file_name.clone()));
-            }
-            if !file_names.insert(segment.file_name.as_str()) {
-                return Err(ManifestError::DuplicateFileName(segment.file_name.clone()));
-            }
-
-            total_document_count = total_document_count
-                .checked_add(u64::from(segment.document_count))
-                .ok_or(ManifestError::TotalDocumentCountOverflow)?;
-            total_segment_bytes = total_segment_bytes
-                .checked_add(segment.length_bytes)
-                .ok_or(ManifestError::TotalSegmentBytesOverflow)?;
-            total_term_entries = total_term_entries
-                .checked_add(u64::from(segment.term_count))
-                .ok_or(ManifestError::TotalTermEntriesOverflow)?;
-        }
-
+        validate_segments(&segments)?;
         Ok(Self { segments })
+    }
+
+    pub(crate) fn from_decoded_segments_unchecked(segments: Vec<SegmentMetadata>) -> Self {
+        Self { segments }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ManifestError> {
+        validate_segments(&self.segments)
     }
 
     pub fn segments(&self) -> &[SegmentMetadata] {
@@ -115,6 +91,45 @@ impl Manifest {
         }
         total
     }
+}
+
+fn validate_segments(segments: &[SegmentMetadata]) -> Result<(), ManifestError> {
+    let mut file_names = HashSet::with_capacity(segments.len());
+    let mut previous_segment_id = None;
+    let mut total_document_count = 0_u64;
+    let mut total_segment_bytes = 0_u64;
+    let mut total_term_entries = 0_u64;
+
+    for segment in segments {
+        if let Some(previous) = previous_segment_id {
+            if segment.id <= previous {
+                return Err(ManifestError::SegmentIdsNotStrictlyIncreasing {
+                    previous,
+                    current: segment.id,
+                });
+            }
+        }
+        previous_segment_id = Some(segment.id);
+
+        if !is_safe_file_name(&segment.file_name) {
+            return Err(ManifestError::UnsafeFileName(segment.file_name.clone()));
+        }
+        if !file_names.insert(segment.file_name.as_str()) {
+            return Err(ManifestError::DuplicateFileName(segment.file_name.clone()));
+        }
+
+        total_document_count = total_document_count
+            .checked_add(u64::from(segment.document_count))
+            .ok_or(ManifestError::TotalDocumentCountOverflow)?;
+        total_segment_bytes = total_segment_bytes
+            .checked_add(segment.length_bytes)
+            .ok_or(ManifestError::TotalSegmentBytesOverflow)?;
+        total_term_entries = total_term_entries
+            .checked_add(u64::from(segment.term_count))
+            .ok_or(ManifestError::TotalTermEntriesOverflow)?;
+    }
+
+    Ok(())
 }
 
 fn is_safe_file_name(file_name: &str) -> bool {

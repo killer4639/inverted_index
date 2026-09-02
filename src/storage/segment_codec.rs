@@ -1,18 +1,27 @@
 use crate::model::InvertedIndex;
+use crate::storage::binary_file::{
+    self, BinaryFileCodec, CHECKSUM_LENGTH, DecodedFile, Decoder, invalid_data, invalid_input,
+};
 use crate::storage::{postings, varint};
-use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io;
+use std::ops::Range;
+use std::path::Path;
 
 pub const MAGIC: &[u8; 8] = b"INVIDX\0\0";
 pub const FORMAT_VERSION: u16 = 1;
 pub const HEADER_LENGTH: usize = 26;
 pub const TERM_OFFSET_LENGTH: usize = 8;
-pub const CHECKSUM_LENGTH: usize = 4;
 
-static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+pub(crate) struct SegmentCodec;
+
+#[derive(Debug)]
+pub(crate) struct SegmentLayout {
+    pub document_count: u32,
+    pub term_count: u32,
+    pub term_offset_table: Range<usize>,
+    pub term_records: Range<usize>,
+    pub postings: Range<usize>,
+}
 
 struct SegmentSections {
     term_record_offsets: Vec<u64>,
@@ -20,86 +29,111 @@ struct SegmentSections {
     postings: Vec<u8>,
 }
 
-struct TemporaryFileCleanup {
-    path: PathBuf,
-}
+impl BinaryFileCodec for SegmentCodec {
+    type Input = InvertedIndex;
+    type Decoded = SegmentLayout;
 
-impl TemporaryFileCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    const FILE_TYPE: &'static str = "segment";
+    const MAGIC: &'static [u8; 8] = MAGIC;
+    const FORMAT_VERSION: u16 = FORMAT_VERSION;
+
+    fn encode_body(_path: &Path, index: &Self::Input, output: &mut Vec<u8>) -> io::Result<()> {
+        let term_count = u32::try_from(index.term_count())
+            .map_err(|_| invalid_input("term count exceeds the segment format limit"))?;
+        let sections = build_sections(index)?;
+
+        let term_offset_table_length = index
+            .term_count()
+            .checked_mul(TERM_OFFSET_LENGTH)
+            .ok_or_else(|| invalid_input("term-offset table length overflow"))?;
+        let term_records_start = HEADER_LENGTH
+            .checked_add(term_offset_table_length)
+            .ok_or_else(|| invalid_input("term-record offset overflow"))?;
+        let postings_offset = term_records_start
+            .checked_add(sections.term_records.len())
+            .ok_or_else(|| invalid_input("postings offset overflow"))?;
+        let postings_offset_u64 = u64::try_from(postings_offset)
+            .map_err(|_| invalid_input("postings offset exceeds u64"))?;
+
+        let segment_length = postings_offset
+            .checked_add(sections.postings.len())
+            .and_then(|length| length.checked_add(CHECKSUM_LENGTH))
+            .ok_or_else(|| invalid_input("segment length overflow"))?;
+        let additional_capacity = segment_length
+            .checked_sub(output.len())
+            .ok_or_else(|| invalid_input("segment length is smaller than its header"))?;
+        output.reserve(additional_capacity);
+
+        output.extend_from_slice(&index.document_count().to_le_bytes());
+        output.extend_from_slice(&term_count.to_le_bytes());
+        output.extend_from_slice(&postings_offset_u64.to_le_bytes());
+
+        let term_records_start_u64 = u64::try_from(term_records_start)
+            .map_err(|_| invalid_input("term-record offset exceeds u64"))?;
+        for relative_offset in sections.term_record_offsets {
+            let absolute_offset = term_records_start_u64
+                .checked_add(relative_offset)
+                .ok_or_else(|| invalid_input("absolute term-record offset overflow"))?;
+            output.extend_from_slice(&absolute_offset.to_le_bytes());
+        }
+
+        output.extend_from_slice(&sections.term_records);
+        output.extend_from_slice(&sections.postings);
+        assert_eq!(output.len() + CHECKSUM_LENGTH, segment_length);
+        Ok(())
+    }
+
+    fn decode_body(_path: &Path, decoder: &mut Decoder<'_>) -> io::Result<Self::Decoded> {
+        let document_count = decoder.read_u32("segment document count")?;
+        let term_count = decoder.read_u32("segment term count")?;
+        let postings_offset = decoder.read_u64("segment postings offset")?;
+        let postings_start = usize_from_u64(
+            postings_offset,
+            "postings offset exceeds addressable memory",
+        )?;
+        let payload_length = decoder.length();
+        if postings_start > payload_length {
+            return Err(invalid_data("postings offset is past the checksum"));
+        }
+
+        let term_count_usize = usize::try_from(term_count)
+            .map_err(|_| invalid_data("term count exceeds addressable memory"))?;
+        let term_offset_table_length = term_count_usize
+            .checked_mul(TERM_OFFSET_LENGTH)
+            .ok_or_else(|| invalid_data("term-offset table length overflow"))?;
+        let term_records_start = HEADER_LENGTH
+            .checked_add(term_offset_table_length)
+            .ok_or_else(|| invalid_data("term-record section overflow"))?;
+        if term_records_start > postings_start {
+            return Err(invalid_data("term records overlap the postings section"));
+        }
+
+        if term_count == 0 {
+            return Ok(SegmentLayout {
+                document_count,
+                term_count,
+                term_offset_table: HEADER_LENGTH..HEADER_LENGTH,
+                term_records: HEADER_LENGTH..HEADER_LENGTH,
+                postings: HEADER_LENGTH..HEADER_LENGTH,
+            });
+        }
+
+        Ok(SegmentLayout {
+            document_count,
+            term_count,
+            term_offset_table: HEADER_LENGTH..term_records_start,
+            term_records: term_records_start..postings_start,
+            postings: postings_start..payload_length,
+        })
     }
 }
 
-impl Drop for TemporaryFileCleanup {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+pub(crate) fn encode(path: impl AsRef<Path>, index: &InvertedIndex) -> io::Result<()> {
+    binary_file::encode::<SegmentCodec>(path, index)
 }
 
-pub fn encode(path: impl AsRef<Path>, index: &InvertedIndex) -> io::Result<()> {
-    let path = path.as_ref();
-    if path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "segment path already exists",
-        ));
-    }
-
-    let segment = build_segment(index)?;
-    let (temporary_path, temporary_file) = create_temporary_file(path)?;
-    let _cleanup = TemporaryFileCleanup::new(temporary_path.clone());
-
-    write_temporary_file(temporary_file, &segment)?;
-    fs::rename(&temporary_path, path)?;
-    Ok(())
-}
-
-fn build_segment(index: &InvertedIndex) -> io::Result<Vec<u8>> {
-    let term_count = u32::try_from(index.term_count())
-        .map_err(|_| invalid_input("term count exceeds the segment format limit"))?;
-    let sections = build_sections(index)?;
-
-    let term_offset_table_length = index
-        .term_count()
-        .checked_mul(TERM_OFFSET_LENGTH)
-        .ok_or_else(|| invalid_input("term-offset table length overflow"))?;
-    let term_records_start = HEADER_LENGTH
-        .checked_add(term_offset_table_length)
-        .ok_or_else(|| invalid_input("term-record offset overflow"))?;
-    let postings_offset = term_records_start
-        .checked_add(sections.term_records.len())
-        .ok_or_else(|| invalid_input("postings offset overflow"))?;
-    let postings_offset_u64 =
-        u64::try_from(postings_offset).map_err(|_| invalid_input("postings offset exceeds u64"))?;
-
-    let segment_length = postings_offset
-        .checked_add(sections.postings.len())
-        .and_then(|length| length.checked_add(CHECKSUM_LENGTH))
-        .ok_or_else(|| invalid_input("segment length overflow"))?;
-    let mut segment = Vec::with_capacity(segment_length);
-
-    write_header(
-        &mut segment,
-        index.document_count(),
-        term_count,
-        postings_offset_u64,
-    );
-
-    let term_records_start_u64 = u64::try_from(term_records_start)
-        .map_err(|_| invalid_input("term-record offset exceeds u64"))?;
-    for relative_offset in sections.term_record_offsets {
-        let absolute_offset = term_records_start_u64
-            .checked_add(relative_offset)
-            .ok_or_else(|| invalid_input("absolute term-record offset overflow"))?;
-        segment.extend_from_slice(&absolute_offset.to_le_bytes());
-    }
-
-    segment.extend_from_slice(&sections.term_records);
-    segment.extend_from_slice(&sections.postings);
-
-    let checksum = crc32fast::hash(&segment);
-    segment.extend_from_slice(&checksum.to_le_bytes());
-    Ok(segment)
+pub(crate) fn decode_bytes(path: &Path, bytes: &[u8]) -> io::Result<DecodedFile<SegmentLayout>> {
+    binary_file::decode_bytes::<SegmentCodec>(path, bytes)
 }
 
 fn build_sections(index: &InvertedIndex) -> io::Result<SegmentSections> {
@@ -154,58 +188,13 @@ fn build_sections(index: &InvertedIndex) -> io::Result<SegmentSections> {
     })
 }
 
-fn write_header(buffer: &mut Vec<u8>, document_count: u32, term_count: u32, postings_offset: u64) {
-    buffer.extend_from_slice(MAGIC);
-    buffer.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    buffer.extend_from_slice(&document_count.to_le_bytes());
-    buffer.extend_from_slice(&term_count.to_le_bytes());
-    buffer.extend_from_slice(&postings_offset.to_le_bytes());
+fn usize_from_u64(value: u64, message: &str) -> io::Result<usize> {
+    usize::try_from(value).map_err(|_| invalid_data(message))
 }
 
-fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| invalid_input("segment path must include a file name"))?;
-    let parent = path.parent().unwrap_or_else(|| Path::new(""));
-
-    for _ in 0..100 {
-        let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        let mut temporary_name = OsString::from(file_name);
-        temporary_name.push(format!(".tmp-{}-{id}", std::process::id()));
-        let temporary_path = parent.join(temporary_name);
-
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-        {
-            Ok(file) => return Ok((temporary_path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not create a unique temporary segment file",
-    ))
-}
-
-fn write_temporary_file(file: File, segment: &[u8]) -> io::Result<()> {
-    let mut writer = BufWriter::new(file);
-    writer.write_all(segment)?;
-    writer.flush()?;
-    writer.get_ref().sync_all()?;
-    drop(writer);
-    Ok(())
-}
-
-fn invalid_input(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message.into())
-}
-
-fn invalid_data(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
+#[cfg(test)]
+fn build_segment(index: &InvertedIndex) -> io::Result<Vec<u8>> {
+    binary_file::encode_bytes::<SegmentCodec>(Path::new("segment.idx"), index)
 }
 
 #[cfg(test)]
@@ -213,6 +202,10 @@ mod tests {
     use super::*;
     use crate::model::Posting;
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
     fn test_index() -> InvertedIndex {
         let mut postings = BTreeMap::new();
@@ -245,23 +238,19 @@ mod tests {
 
     #[test]
     fn header_matches_the_format_contract() {
-        let mut bytes = Vec::new();
+        let bytes = build_segment(&test_index()).unwrap();
 
-        write_header(&mut bytes, 3, 5, 42);
-
-        assert_eq!(bytes.len(), HEADER_LENGTH);
         assert_eq!(&bytes[0..8], MAGIC);
         assert_eq!(&bytes[8..10], &FORMAT_VERSION.to_le_bytes());
-        assert_eq!(&bytes[10..14], &3u32.to_le_bytes());
-        assert_eq!(&bytes[14..18], &5u32.to_le_bytes());
-        assert_eq!(&bytes[18..26], &42u64.to_le_bytes());
+        assert_eq!(&bytes[10..14], &4u32.to_le_bytes());
+        assert_eq!(&bytes[14..18], &2u32.to_le_bytes());
+        assert_eq!(&bytes[18..26], &88u64.to_le_bytes());
     }
 
     #[test]
     fn segment_contains_term_records_postings_and_footer() {
         let segment = build_segment(&test_index()).unwrap();
 
-        assert_eq!(u64::from_le_bytes(segment[18..26].try_into().unwrap()), 88);
         assert_eq!(u64::from_le_bytes(segment[26..34].try_into().unwrap()), 42);
         assert_eq!(u64::from_le_bytes(segment[34..42].try_into().unwrap()), 64);
         assert_eq!(&segment[88..94], &[0x00, 0x02, 0x03, 0x01, 0x01, 0x01]);
@@ -283,13 +272,6 @@ mod tests {
         assert_eq!(
             u64::from_le_bytes(segment[18..26].try_into().unwrap()),
             HEADER_LENGTH as u64
-        );
-
-        let checksum_offset = segment.len() - CHECKSUM_LENGTH;
-        let stored_checksum = u32::from_le_bytes(segment[checksum_offset..].try_into().unwrap());
-        assert_eq!(
-            stored_checksum,
-            crc32fast::hash(&segment[..checksum_offset])
         );
     }
 
@@ -345,7 +327,7 @@ mod tests {
 
     #[test]
     fn segment_is_published_from_a_temporary_file() {
-        let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let id = TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "inverted-index-segment-{}-{id}.idx",
             std::process::id()
@@ -356,36 +338,5 @@ mod tests {
 
         assert_eq!(fs::read(&path).unwrap(), expected);
         fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn existing_segment_is_not_replaced() {
-        let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "existing-inverted-index-segment-{}-{id}.idx",
-            std::process::id()
-        ));
-        fs::write(&path, b"existing").unwrap();
-
-        let error = encode(&path, &test_index()).unwrap_err();
-
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read(&path).unwrap(), b"existing");
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn temporary_file_cleanup_removes_unpublished_file() {
-        let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "inverted-index-cleanup-{}-{id}.tmp",
-            std::process::id()
-        ));
-        fs::write(&path, b"partial").unwrap();
-
-        let cleanup = TemporaryFileCleanup::new(path.clone());
-        drop(cleanup);
-
-        assert!(!path.exists());
     }
 }

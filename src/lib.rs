@@ -15,5 +15,6 @@ pub use search::{
 };
 pub use storage::index_storage::{CounterError, IndexStorage, IndexStorageError};
 pub use storage::manifest::{Manifest, ManifestError, SegmentMetadata};
+pub use storage::manifest_codec::{decode as decode_manifest, encode as encode_manifest};
 pub use storage::postings::DecodeError;
 pub use storage::varint::DecodeError as VarintDecodeError;

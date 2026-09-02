@@ -19,14 +19,17 @@ The current engine has the correct low-level primitives:
   reads enough header layout information for safe access
   (`src/storage/segment_reader.rs`).
 - Segment format version 1 stores dense segment-local `u32` document IDs and
-  does not contain global identity (`src/storage/segment_writer.rs`).
+  does not contain global identity (`src/storage/segment_codec.rs`).
+- `BinaryFileCodec` centralizes the common magic/version prefix, CRC32 footer,
+  checked decoding cursor, and temporary-file publication sequence
+  (`src/storage/binary_file.rs`).
 - `QueryEngine` performs exact dictionary lookup and returns a lazy
   `PostingsDecoder` (`src/search/query_engine.rs`).
 - `LookupExecutor` owns segment opening, memory-map reuse, result
   materialization, and completed lookup statistics
   (`src/search/lookup_executor.rs`).
-- Segment publication already uses a temporary file followed by rename
-  (`src/storage/segment_writer.rs`).
+- Segment publication uses the shared temporary-file writer followed by rename
+  (`src/storage/binary_file.rs`).
 - The CLI currently accepts one segment path for `lookup` and `lookup-stats`
   (`src/main.rs`).
 
@@ -44,11 +47,11 @@ manifest generations:
 ```text
 my-index/
   segments/
-    segment-0000000000000001.idx
-    segment-0000000000000002.idx
+    segment-00000000000000000001.idx
+    segment-00000000000000000002.idx
   manifests/
-    manifest-0000000000000001.bin
-    manifest-0000000000000002.bin
+    manifest-00000000000000000001.bin
+    manifest-00000000000000000002.bin
 ```
 
 Temporary files use names that cannot be mistaken for published files and are
@@ -223,18 +226,32 @@ file name and size alone.
 
 ### Manifest validation
 
-Reject:
+Before writing, `Manifest::new` and the codec reject:
 
-- invalid magic or unsupported version;
-- checksum mismatch;
-- truncated or trailing data;
-- zero or duplicate generations where prohibited by the writer;
-- segment-count conversion or allocation overflow;
 - zero, duplicate, or non-increasing segment IDs;
 - empty, duplicate, absolute, or non-UTF-8 file names;
 - file names containing separators, `.` or `..` path components;
+- aggregate count and byte overflows.
+
+While reading, the codec validates only what is required to establish byte
+integrity and decode safely:
+
+- exact published filename and nonzero generation;
+- invalid magic or unsupported version;
+- checksum mismatch;
+- truncated or trailing data;
+- header generation mismatch;
+- segment-count conversion or allocation overflow;
+- canonical varints and UTF-8 file names;
+- nonzero segment IDs required by the `SegmentId` type;
+- aggregate arithmetic overflow.
+
+The reader does not repeat ordering, uniqueness, or path-safety validation that
+the writer performed before calculating the checksum.
+
+The later index-directory reader additionally rejects:
+
 - file names outside the exact segment naming convention;
-- impossible lengths;
 - duplicate referenced paths;
 - a referenced file that is absent;
 - segment size mismatch;
@@ -437,7 +454,10 @@ manifest. This is the cheapest point to correct identity or iterator mistakes.
 
 Encode, validate, and reopen deterministic binary manifest generations.
 
-### New file: `src/storage/manifest_codec.rs`
+### New files
+
+- `src/storage/binary_file.rs`
+- `src/storage/manifest_codec.rs`
 
 Implement:
 
@@ -446,8 +466,10 @@ pub fn encode(path: impl AsRef<Path>, manifest: &Manifest) -> io::Result<()>;
 pub fn decode(path: impl AsRef<Path>) -> io::Result<Manifest>;
 ```
 
-Follow the segment codec's existing temporary-file publication pattern, but use
-manifest-specific constants and errors.
+Implement `BinaryFileCodec` for both segment and manifest formats. The generic
+layer owns magic/version framing, checksum verification, checked primitive
+decoding, and immutable publication. Each codec retains its own format-specific
+validation and record layout.
 
 Do not expose partially decoded manifests. Validation completes before a
 `Manifest` is returned.
@@ -459,13 +481,12 @@ Do not expose partially decoded manifests. Validation completes before a
 - empty manifest;
 - round trip;
 - existing destination is not replaced;
-- temporary-file cleanup;
+- shared temporary-file cleanup;
 - every truncated prefix is rejected without panic;
 - checksum mismatch;
 - unsupported version;
 - noncanonical varints;
-- duplicate IDs and paths;
-- unsafe file names;
+- duplicate IDs, duplicate paths, and unsafe file names rejected before write;
 - trailing bytes;
 - integer overflow and impossible segment count.
 
@@ -904,7 +925,8 @@ write, recovery, and compaction feature.
 
 - Current short-term roadmap: `docs/immediate-next-steps.md`
 - Long-term roadmap: `docs/search-engine-research-roadmap.md`
-- Segment format and publication: `src/storage/segment_writer.rs`
+- Shared binary-file framing and publication: `src/storage/binary_file.rs`
+- Segment format encoding and layout decoding: `src/storage/segment_codec.rs`
 - Segment checksum verification and lazy record parsing:
   `src/storage/segment_reader.rs`
 - Single-segment lookup: `src/search/query_engine.rs`

@@ -129,8 +129,8 @@ mod tests {
     use crate::storage::manifest::{
         MANIFEST_FILE_PREFIX, Manifest, SEGMENT_FILE_PREFIX, SEGMENT_FILE_SUFFIX, SegmentMetadata,
     };
+    use crate::storage::segment_codec;
     use crate::storage::segment_reader::SegmentReader;
-    use crate::storage::segment_writer;
     use crate::{AddressedPosting, DocumentAddress, SegmentId};
     use std::collections::BTreeMap;
     use std::fs;
@@ -210,7 +210,7 @@ mod tests {
         let mut terms = BTreeMap::new();
         terms.insert("rust".to_owned(), rust_postings);
         let index = InvertedIndex::from_finalized_postings(terms, document_count);
-        segment_writer::encode(&path, &index).unwrap();
+        segment_codec::encode(&path, &index).unwrap();
 
         let reader = SegmentReader::open(&path).unwrap();
         SegmentMetadata {

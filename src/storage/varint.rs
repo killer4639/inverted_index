@@ -42,6 +42,15 @@ pub fn encode(mut value: u32, output: &mut Vec<u8>) {
     }
 }
 
+pub fn encoded_length(mut value: u32) -> usize {
+    let mut length = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        length += 1;
+    }
+    length
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DecodeError {
     Truncated,
@@ -80,6 +89,17 @@ mod tests {
         encode(300, &mut output);
 
         assert_eq!(output, [0xAA, 0xAC, 0x02]);
+    }
+
+    #[test]
+    fn encoded_length_matches_encoding() {
+        let values = [0, 1, 127, 128, 300, 16_383, 16_384, u32::MAX];
+
+        for value in values {
+            let mut output = Vec::new();
+            encode(value, &mut output);
+            assert_eq!(encoded_length(value), output.len());
+        }
     }
 
     #[test]

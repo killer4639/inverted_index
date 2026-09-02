@@ -29,6 +29,10 @@ impl SegmentId {
         }
         Ok(SegmentId(segment_id))
     }
+
+    pub fn value(self) -> u64 {
+        self.0
+    }
 }
 
 impl Ord for DocumentAddress {
