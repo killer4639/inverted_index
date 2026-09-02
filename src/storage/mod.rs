@@ -1,4 +1,5 @@
 pub(crate) mod binary_file;
+pub(crate) mod index_snapshot;
 pub(crate) mod index_storage;
 pub(crate) mod manifest;
 pub(crate) mod manifest_codec;

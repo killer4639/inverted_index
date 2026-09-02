@@ -7,9 +7,9 @@ immutable set of segments described by a binary manifest. Exact-term lookups
 will search every visible segment and lazily return postings identified by a
 segment ID and segment-local document ID.
 
-This phase establishes the read-side architecture needed by future incremental
-ingestion, WAL recovery, updates, deletes, and compaction. It does not implement
-those write-side features.
+This plan includes only the append-only manifest publication required by the
+current `build` command. It intentionally excludes advanced write lifecycle
+features such as updates, deletes, repair, and compaction.
 
 ## Current State Analysis
 
@@ -30,8 +30,11 @@ The current engine has the correct low-level primitives:
   (`src/search/lookup_executor.rs`).
 - Segment publication uses the shared temporary-file writer followed by rename
   (`src/storage/binary_file.rs`).
-- The CLI currently accepts one segment path for `lookup` and `lookup-stats`
-  (`src/main.rs`).
+- The CLI uses one fixed `index` directory. `build <corpus>` writes another
+  numbered segment, while `lookup` and `lookup-stats` query all numbered
+  segments (`src/main.rs`).
+- The current startup path synthesizes a manifest by scanning every segment.
+  Persisted manifests are not yet published or used to define visibility.
 
 The missing layer is an immutable index snapshot that owns several
 checksum-verified segment readers and defines the physical identity of
@@ -68,9 +71,6 @@ There is no mutable `CURRENT` pointer in this phase. `open_latest`:
 
 It must not silently fall back to an older generation. Silent fallback would
 turn corruption into stale reads.
-
-An explicit `open_generation` API allows tests and future snapshot operations
-to open an older manifest.
 
 ### Document identity
 
@@ -128,15 +128,17 @@ the manifest, not in every segment.
 
 ## Desired End State
 
-The completed phase supports:
+The completed phase keeps the current commands:
 
 ```text
-lookup-index <index-directory> <term>
-lookup-index-stats <index-directory> <term>
+build <corpus>
+lookup <term>
+lookup-stats <term>
 ```
 
-Opening an index directory pins one immutable manifest generation and opens all
-segments referenced by it. Repeated lookups reuse every open memory map.
+Each successful build publishes one immutable segment followed by a new
+manifest generation. Lookups pin the latest successfully published generation
+and reuse every open memory map until another build succeeds.
 
 A lookup returns:
 
@@ -153,9 +155,11 @@ in-memory oracle.
 
 ## What We Are Not Doing
 
-- No WAL or crash recovery for acknowledged writes
+- No WAL, replay, repair, or orphan cleanup
 - No mutable memtable
-- No incremental append command
+- No separate assembly, import, or index-directory command family
+- No automatic adoption of pre-manifest segment directories
+- No concurrent or multi-process writers
 - No updates or deletes
 - No tombstones
 - No segment merging or compaction
@@ -498,37 +502,36 @@ Do not expose partially decoded manifests. Validation completes before a
 
 ---
 
-## Phase 4: Index Directory Reader
+## Phase 4: Persisted Index Snapshots and Manifest Publication
 
 ### Goal
 
-Open a complete immutable index snapshot from disk.
+Make a published manifest generation the only source of segment visibility.
 
-### New file: `src/storage/index_directory.rs`
+### Runtime ownership
 
-Add:
+`IndexStorage` discovers and decodes the latest manifest. `IndexSnapshot` owns
+the resulting runtime state:
 
 ```rust
-pub struct IndexDirectory {
-    root: PathBuf,
-}
-
-impl IndexDirectory {
-    pub fn open_latest(&self) -> Result<IndexSnapshot, IndexOpenError>;
-    pub fn open_generation(
-        &self,
-        generation: u64,
-    ) -> Result<IndexSnapshot, IndexOpenError>;
+pub struct ManagedSegment {
+    metadata: SegmentMetadata,
+    query_engine: QueryEngine,
 }
 
 pub struct IndexSnapshot {
-    manifest: Manifest,
-    query_engine: MultiSegmentQueryEngine,
+    generation: Option<u64>,
+    segments: Vec<ManagedSegment>,
 }
 ```
 
-`IndexSnapshot` owns all segment readers and therefore pins that generation.
-No refresh occurs behind the caller's back.
+The decoded `Manifest` is temporary. Its segment metadata is transferred into
+the snapshot, and the manifest object is then dropped. A snapshot with no
+generation and no segments represents an index that has not published its
+first manifest.
+
+The owning `MultiSegmentQueryEngine` type introduced in Phase 2 is folded into
+`IndexSnapshot`; its query behavior and `ManagedSegment` values now live there.
 
 ### Latest-generation discovery
 
@@ -537,10 +540,21 @@ No refresh occurs behind the caller's back.
 - ignore temporary and unrelated files;
 - detect numeric overflow;
 - choose the greatest generation;
-- fail if that manifest is invalid;
-- return an explicit empty-index error when no manifest exists.
+- fail if the selected manifest is invalid;
+- never fall back to an older generation after selecting the latest.
 
 Do not recursively scan directories.
+
+### Source-of-truth rule
+
+- if no manifest exists, `IndexSnapshot::new` returns an empty snapshot;
+- if a manifest exists, only its segment records are visible;
+- segment files not referenced by that manifest are ignored;
+- never infer visibility by scanning the segment directory.
+
+Before the first manifest-backed build, a pre-manifest development index must
+be cleared and rebuilt. The build path reports this explicitly rather than
+adopting those files.
 
 ### Segment opening
 
@@ -549,97 +563,79 @@ For each manifest record:
 1. resolve the file under `segments`;
 2. verify it remains under that directory;
 3. check file length;
-4. check the stored footer checksum against manifest metadata;
-5. open through `QueryEngine`, verifying the segment checksum and safe layout;
+4. compare the stored footer checksum with manifest metadata;
+5. open it through `SegmentReader`, verifying checksum and safe layout;
 6. compare document and term counts;
 7. retain the reader in manifest order.
 
-Fail the entire snapshot open if any segment fails. Partial index visibility is
-not allowed.
+Fail the complete snapshot open if any segment fails. Partial index visibility
+is not allowed.
 
 ### Tests
 
+- fresh empty directory opens an empty snapshot with no generation;
 - latest generation selected;
-- explicit old generation remains readable;
-- temporary manifests ignored;
-- malformed published latest manifest fails without fallback;
-- missing referenced segment;
-- valid but substituted segment rejected by metadata mismatch;
-- size, checksum, document-count, and term-count mismatch;
+- temporary and unrelated manifest files ignored;
+- malformed latest manifest fails without fallback;
+- unreferenced segment files remain invisible;
+- missing or substituted segment rejected;
+- size, checksum, document-count, and term-count mismatch rejected;
 - segment traversal attempt rejected;
-- empty manifest opens an empty index;
-- reader remains usable after a newer manifest appears.
+- empty published manifest opens an empty snapshot;
+- an already-open snapshot remains pinned after a newer generation appears.
 
 ### Success criteria
 
-- One `IndexSnapshot` always represents exactly one manifest generation.
-- Opening never silently produces a partial or stale snapshot.
+- Every published `IndexSnapshot` represents exactly one manifest generation;
+  the only exception is the explicit empty, uninitialized snapshot.
+- The latest manifest is the complete source of visible index state.
+- Opening never silently produces a partial, inferred, or stale snapshot.
 
----
+### Manifest-backed build and CLI integration
 
-## Phase 5: Minimal Index Assembly and CLI Integration
+Make the existing `build`, `lookup`, and `lookup-stats` commands use persisted
+manifest generations.
 
-### Goal
+#### Build publication protocol
 
-Make multi-segment reads usable without implementing incremental ingestion.
+For `build <corpus>`:
 
-### Minimal assembly API
+1. open the latest snapshot, or confirm that a new index has no segment files;
+2. reserve the next segment ID and manifest generation;
+3. build and publish the new immutable segment;
+4. reopen the segment and collect its validated metadata;
+5. construct a manifest containing the previous visible segments plus the new
+   segment;
+6. publish the new manifest generation last;
+7. reopen that exact generation as a new `IndexSnapshot`;
+8. replace the CLI's cached snapshot only after every preceding step succeeds;
+9. report build success only after the manifest is published.
 
-Add a narrowly scoped helper that creates generation 1 from existing immutable
-segments:
+Generation 1 publishes the first segment. Every later successful build
+publishes generation 2, 3, and so on.
 
-```text
-assemble-index <index-directory> <segment-path>...
-```
+If segment publication succeeds but manifest publication fails, the segment is
+an invisible orphan. ID gaps are valid. No rollback, repair, or automatic
+cleanup is added.
 
-Behavior:
-
-1. require a new or empty index directory;
-2. verify the checksum and safe layout of every input segment;
-3. assign strictly increasing `SegmentId` values beginning at 1;
-4. copy each segment to its generated immutable name under `segments`;
-5. synchronize completed segment copies;
-6. publish manifest generation 1 last;
-7. never modify the source segment files.
-
-This is fixture/bootstrap functionality, not incremental ingestion. Publishing
-generation 2 belongs to the subsequent append phase.
-
-### Lookup commands
-
-Add:
+#### Existing commands only
 
 ```text
-lookup-index <index-directory> <term>
-lookup-index-stats <index-directory> <term>
+build <corpus>
+lookup <term>
+lookup-stats <term>
 ```
 
-Keep:
+Do not add `assemble-index`, `lookup-index`, directory arguments, or parallel
+single-segment command variants.
 
-```text
-build <corpus> <segment>
-lookup <segment> <term>
-lookup-stats <segment> <term>
-```
+At startup, open the latest snapshot once. Before the first successful build,
+lookups operate on an empty in-memory query engine. After a successful build,
+subsequent lookups reuse the newly pinned snapshot and its memory maps.
 
-This preserves the single-segment baseline and allows direct comparison.
+#### CLI display
 
-### Executor boundary
-
-Add `MultiSegmentLookupExecutor` rather than making the existing
-`LookupExecutor` handle two unrelated path types.
-
-The executor:
-
-- reuses an open `IndexSnapshot` when the directory and generation are
-  unchanged;
-- consumes the lazy multi-segment iterator;
-- materializes `AddressedPosting` only for CLI display;
-- returns completed multi-segment statistics.
-
-### CLI display
-
-Display physical addresses explicitly:
+Continue displaying physical addresses explicitly:
 
 ```text
 segment 2, document 41: frequency 3
@@ -648,23 +644,28 @@ segment 2, document 41: frequency 3
 Do not print a synthetic global document ID that could be mistaken for a stable
 identifier.
 
-### Tests
+#### Tests
 
-- assemble two independently built segments;
-- query shared and disjoint terms;
-- preserve source segments;
-- refuse existing non-empty destination state;
+- first build publishes segment 1 and manifest generation 1;
+- later builds preserve earlier segments and publish increasing generations;
+- shared and disjoint terms query correctly after each build;
+- manifest publication occurs after segment publication;
+- an unpublished segment remains invisible;
+- a failed build does not replace the cached snapshot;
+- process restart opens the same latest generation;
 - repeated lookups reuse the same snapshot and memory maps;
-- single-segment commands retain current behavior.
+- startup rejects legacy unmanifested segment directories.
 
-### Success criteria
+#### Success criteria
 
-- A user can construct and query a multi-segment index using CLI commands.
-- Existing single-segment workflows remain compatible.
+- Every successful `build` atomically advances visible index state by one
+  manifest generation.
+- Existing lookup commands query only the latest successfully published state.
+- No additional command family is introduced.
 
 ---
 
-## Phase 6: Multi-Segment Observability
+## Phase 5: Multi-Segment Observability
 
 ### Goal
 
@@ -730,7 +731,7 @@ Do not add parallel execution in this phase.
 
 ---
 
-## Phase 7: Correctness, Failure, and Scaling Validation
+## Phase 6: Correctness, Failure, and Scaling Validation
 
 ### Correctness oracle
 
@@ -740,8 +741,9 @@ Build a simple test oracle:
 BTreeMap<Term, Vec<AddressedPosting>>
 ```
 
-Generate several independent corpora, build one segment per corpus, assemble an
-index, and compare every known and missing term against the oracle.
+Generate several independent corpora, add one segment per corpus through
+repeated `build` operations, and compare every known and missing term against
+the oracle.
 
 Include:
 
@@ -767,18 +769,18 @@ generator becomes a clear maintenance burden.
 
 ### Failure tests
 
-Inject failures or malformed state around:
+Inject interrupted publication or malformed state around:
 
-- segment copied but manifest not published;
+- segment published but manifest not published;
 - manifest temporary file left behind;
 - latest manifest truncated;
 - referenced segment absent;
 - segment replaced with another valid segment;
-- duplicate generation filename;
 - unrelated directory entries;
 - invalid and overflowing manifest names.
 
-An unpublished segment must remain invisible. Cleanup is intentionally deferred.
+An unpublished segment must remain invisible. No repair or cleanup behavior is
+required.
 
 ### Scaling benchmark
 
@@ -810,21 +812,19 @@ benchmarks/results/multi-segment-<date>.json
 ### Success criteria
 
 - All oracle and corruption cases pass.
-- Old manifest generations remain reproducible.
+- Restarting consistently selects the same latest published generation.
 - The segment-count latency curve is recorded without prematurely optimizing
   it.
 
 ## Error Model
 
-Introduce typed errors at new subsystem boundaries:
+Introduce typed errors at the remaining subsystem boundaries:
 
 ```text
-ManifestEncodeError
-ManifestDecodeError
 IndexOpenError
+IndexUpdateError
 MultiSegmentQueryError
 SegmentDecodeError
-IndexAssemblyError
 ```
 
 Errors must retain:
@@ -871,12 +871,13 @@ The implementation should still avoid accidental overhead:
 ## Migration and Compatibility
 
 - Existing `.idx` files remain valid without rewriting.
-- Existing single-segment commands remain supported.
-- `assemble-index` copies existing segment bytes and records their existing
-  footer checksums.
+- The existing `build`, `lookup`, and `lookup-stats` command names remain.
+- A pre-manifest index containing segment files is rejected and must be cleared
+  and rebuilt.
+- Existing segment files are never adopted automatically because their
+  publication status cannot be proven.
 - No stable external document IDs are promised.
-- Future append work publishes generation 2 and later using the same manifest
-  format.
+- Every successful build after the first publishes the next manifest generation.
 - Future compaction may replace segment IDs and physical document addresses in a
   newer manifest while older pinned generations remain readable.
 
@@ -884,7 +885,7 @@ The implementation should still avoid accidental overhead:
 
 Update:
 
-- `README.md` with index-directory layout and new commands;
+- `README.md` with the index-directory layout and persisted-manifest behavior;
 - `docs/immediate-next-steps.md` when the phase is complete;
 - the segment-format documentation to clarify that IDs are segment-local;
 - observability documentation with multi-segment metric definitions.
@@ -893,15 +894,14 @@ Update:
 
 The multi-segment read phase is complete only when:
 
-1. Multiple existing immutable segments can be assembled into one index
-   directory.
-2. The latest or an explicit older manifest generation can be opened.
+1. Repeated `build` commands publish increasing manifest generations.
+2. Restarting opens the latest published manifest generation.
 3. Exact-term queries return complete, ordered `AddressedPosting` values.
 4. Posting decoding remains lazy at the query-engine boundary.
 5. Repeated lookups reuse the pinned snapshot and all memory maps.
 6. Missing, corrupt, substituted, or inconsistent files fail explicitly.
 7. Unpublished segment files are invisible.
-8. Existing single-segment behavior and format remain compatible.
+8. Existing command names and segment format remain compatible.
 9. Results match a deterministic in-memory oracle.
 10. Lookup cost is measured from 1 through 128 segments.
 
@@ -911,15 +911,15 @@ The multi-segment read phase is complete only when:
 domain types
     -> in-memory multi-segment query
     -> manifest codec
-    -> index-directory snapshot
-    -> assembly and CLI
+    -> persisted index snapshot
+    -> manifest-backed build and CLI
     -> observability
     -> correctness and scaling baseline
 ```
 
-Pause after the in-memory query phase and again after manifest decoding. These
-are the two points where mistakes would otherwise propagate into every future
-write, recovery, and compaction feature.
+Pause after manifest decoding and again after the first manifest-backed build.
+These are the points where visibility mistakes would otherwise propagate into
+every later index generation.
 
 ## References
 

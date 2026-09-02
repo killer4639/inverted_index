@@ -1,9 +1,9 @@
-use crate::SegmentId;
 use crate::storage::manifest::{
-    FILE_NUMBER_WIDTH, MANIFEST_FILE_PREFIX, MANIFEST_FILE_SUFFIX, Manifest, ManifestError,
-    SEGMENT_FILE_PREFIX, SEGMENT_FILE_SUFFIX, SegmentMetadata,
+    FILE_NUMBER_WIDTH, MANIFEST_FILE_PREFIX, MANIFEST_FILE_SUFFIX, Manifest, SEGMENT_FILE_PREFIX,
+    SEGMENT_FILE_SUFFIX, SegmentMetadata,
 };
 use crate::storage::segment_reader::SegmentReader;
+use crate::{SegmentId, decode_manifest};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -26,7 +26,6 @@ pub enum IndexStorageError {
     Io(io::Error),
     Counter(CounterError),
     InvalidSegmentId(u64),
-    Manifest(ManifestError),
 }
 
 pub struct IndexStorage {
@@ -37,7 +36,11 @@ pub struct IndexStorage {
 
 impl IndexStorage {
     pub fn new() -> Result<Self, IndexStorageError> {
-        let index_directory = PathBuf::from(INDEX_DIRECTORY);
+        Self::new_at(PathBuf::from(INDEX_DIRECTORY))
+    }
+
+    pub(crate) fn new_at(index_directory: impl Into<PathBuf>) -> Result<Self, IndexStorageError> {
+        let index_directory = index_directory.into();
         let manifest_directory = index_directory.join(MANIFEST_DIRECTORY);
         let segment_directory = index_directory.join(SEGMENT_DIRECTORY);
 
@@ -104,34 +107,6 @@ impl IndexStorage {
         Ok(self.segment_file_path(segment_id))
     }
 
-    pub fn manifest_from_published_segments(&self) -> Result<Manifest, IndexStorageError> {
-        // Before manifest persistence exists, every valid published segment is active.
-        let published_segments = get_numbered_files(
-            &self.segment_directory(),
-            SEGMENT_FILE_PREFIX,
-            SEGMENT_FILE_SUFFIX,
-        )?;
-        let mut segments = Vec::with_capacity(published_segments.len());
-
-        for published_segment in published_segments {
-            let segment_id = SegmentId::new(published_segment.number)
-                .map_err(|_| IndexStorageError::InvalidSegmentId(published_segment.number))?;
-            let reader = SegmentReader::open(&published_segment.path)?;
-            let length_bytes = fs::metadata(&published_segment.path)?.len();
-
-            segments.push(SegmentMetadata {
-                id: segment_id,
-                file_name: published_segment.file_name,
-                document_count: reader.document_count(),
-                term_count: reader.term_count(),
-                length_bytes,
-                checksum: reader.checksum(),
-            });
-        }
-
-        Manifest::new(segments).map_err(IndexStorageError::Manifest)
-    }
-
     pub fn reserve_manifest_generation(&self) -> Result<u64, CounterError> {
         reserve_counter(
             &self.manifest_generation_next,
@@ -142,12 +117,50 @@ impl IndexStorage {
     pub fn reserve_segment_id(&self) -> Result<u64, CounterError> {
         reserve_counter(&self.segment_id_next, CounterError::SegmentIdExhausted)
     }
-}
 
-struct NumberedFile {
-    number: u64,
-    file_name: String,
-    path: PathBuf,
+    pub fn load_segment_metadata(
+        &self,
+        segment_id_value: u64,
+    ) -> Result<SegmentMetadata, IndexStorageError> {
+        let segment_id = SegmentId::new(segment_id_value)
+            .map_err(|_| IndexStorageError::InvalidSegmentId(segment_id_value))?;
+        let segment_path = self.segment_file_path(segment_id_value);
+        let segment_reader = SegmentReader::open(&segment_path)?;
+        let length_bytes = fs::metadata(&segment_path)?.len();
+        let file_name = segment_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "segment file name is not UTF-8")
+            })?
+            .to_owned();
+
+        Ok(SegmentMetadata {
+            id: segment_id,
+            file_name,
+            document_count: segment_reader.document_count(),
+            term_count: segment_reader.term_count(),
+            length_bytes,
+            checksum: segment_reader.checksum(),
+        })
+    }
+
+    pub fn open_latest_manifest_with_gen(
+        &self,
+    ) -> Result<Option<(u64, Manifest)>, IndexStorageError> {
+        let generation = get_highest_file_number(
+            self.manifest_directory().as_path(),
+            MANIFEST_FILE_PREFIX,
+            MANIFEST_FILE_SUFFIX,
+        )?;
+        if generation == 0 {
+            return Ok(None);
+        }
+
+        let manifest_path = self.manifest_file_path(generation);
+        let manifest = decode_manifest(&manifest_path)?;
+        Ok(Some((generation, manifest)))
+    }
 }
 
 fn get_highest_file_number(
@@ -174,44 +187,11 @@ fn get_highest_file_number(
     Ok(highest_number)
 }
 
-fn get_numbered_files(
-    directory: &Path,
-    file_prefix: &str,
-    file_suffix: &str,
-) -> io::Result<Vec<NumberedFile>> {
-    let mut files = Vec::new();
-
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-
-        let file_name = entry.file_name();
-        let Some(file_number) = parse_file_number(file_name.to_str(), file_prefix, file_suffix)
-        else {
-            continue;
-        };
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-
-        files.push(NumberedFile {
-            number: file_number,
-            file_name: file_name.to_owned(),
-            path: entry.path(),
-        });
-    }
-
-    files.sort_unstable_by_key(|file| file.number);
-    Ok(files)
-}
-
 fn parse_file_number(file_name: Option<&str>, file_prefix: &str, file_suffix: &str) -> Option<u64> {
     let number_text = file_name?
         .strip_prefix(file_prefix)?
         .strip_suffix(file_suffix)?;
-    if number_text.is_empty()
+    if number_text.len() != FILE_NUMBER_WIDTH
         || !number_text
             .bytes()
             .all(|character| character.is_ascii_digit())
@@ -219,7 +199,11 @@ fn parse_file_number(file_name: Option<&str>, file_prefix: &str, file_suffix: &s
         return None;
     }
 
-    number_text.parse::<u64>().ok()
+    let number = number_text.parse::<u64>().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some(number)
 }
 
 fn reserve_counter(counter: &AtomicU64, exhausted: CounterError) -> Result<u64, CounterError> {
@@ -265,7 +249,6 @@ impl fmt::Display for IndexStorageError {
             Self::InvalidSegmentId(segment_id) => {
                 write!(formatter, "published segment has invalid ID {segment_id}")
             }
-            Self::Manifest(error) => write!(formatter, "invalid segment manifest: {error:?}"),
         }
     }
 }
@@ -275,7 +258,7 @@ impl Error for IndexStorageError {
         match self {
             Self::Io(error) => Some(error),
             Self::Counter(error) => Some(error),
-            Self::InvalidSegmentId(_) | Self::Manifest(_) => None,
+            Self::InvalidSegmentId(_) => None,
         }
     }
 }

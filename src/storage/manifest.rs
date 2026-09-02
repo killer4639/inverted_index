@@ -10,6 +10,7 @@ pub const FILE_NUMBER_WIDTH: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestError {
+    SegmentCountOverflow,
     SegmentIdsNotStrictlyIncreasing {
         previous: SegmentId,
         current: SegmentId,
@@ -26,7 +27,7 @@ pub struct Manifest {
     segments: Vec<SegmentMetadata>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentMetadata {
     pub id: SegmentId,
     pub file_name: String,

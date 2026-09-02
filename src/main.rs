@@ -3,8 +3,8 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use inverted_index::{
-    IndexCreationStats, IndexStorage, MultiSegmentDictionaryStats, MultiSegmentQueryEngine,
-    create_index,
+    IndexCreationStats, IndexSnapshot, IndexStorage, MultiSegmentDictionaryStats, create_index,
+    encode_manifest,
 };
 
 const USAGE: &str = "usage:
@@ -21,8 +21,8 @@ fn main() {
             process::exit(1);
         }
     };
-    let mut query_engine = match open_query_engine(&index_storage) {
-        Ok(query_engine) => query_engine,
+    let mut index_snapshot = match open_index_snapshot(&index_storage) {
+        Ok(index_snapshot) => index_snapshot,
         Err(error) => {
             eprintln!("{error}");
             process::exit(1);
@@ -48,9 +48,11 @@ fn main() {
 
         let arguments: Vec<&str> = line.split_whitespace().collect();
         let result = match arguments.as_slice() {
-            ["build", corpus_path] => build_segment(corpus_path, &index_storage, &mut query_engine),
-            ["lookup", term] => lookup_term(term, &query_engine, true),
-            ["lookup-stats", term] => lookup_term(term, &query_engine, false),
+            ["build", corpus_path] => {
+                build_segment(corpus_path, &index_storage, &mut index_snapshot)
+            }
+            ["lookup", term] => lookup_term(term, &index_snapshot, true),
+            ["lookup-stats", term] => lookup_term(term, &index_snapshot, false),
             [] => continue,
             _ => {
                 eprintln!("{USAGE}");
@@ -67,14 +69,30 @@ fn main() {
 fn build_segment(
     corpus_path: &str,
     index_storage: &IndexStorage,
-    query_engine: &mut MultiSegmentQueryEngine,
+    index_snapshot: &mut IndexSnapshot,
 ) -> Result<(), String> {
-    let segment_path = index_storage
-        .reserve_segment_file_path()
-        .map_err(|error| format!("failed to reserve segment path: {error}"))?;
+    let segment_id = index_storage
+        .reserve_segment_id()
+        .map_err(|error| format!("failed to reserve segment ID: {error}"))?;
+    let segment_path = index_storage.segment_file_path(segment_id);
     let stats = create_index(corpus_path, &segment_path)?;
-    let refreshed_query_engine = open_query_engine(index_storage)?;
-    *query_engine = refreshed_query_engine;
+
+    let segment_metadata = index_storage
+        .load_segment_metadata(segment_id)
+        .map_err(|error| format!("failed to load new segment metadata: {error}"))?;
+    let manifest = index_snapshot
+        .manifest_with_segment(segment_metadata)
+        .map_err(|error| format!("failed to build next manifest: {error:?}"))?;
+    let manifest_generation = index_storage
+        .reserve_manifest_generation()
+        .map_err(|error| format!("failed to reserve manifest generation: {error}"))?;
+    let manifest_path = index_storage.manifest_file_path(manifest_generation);
+
+    encode_manifest(&manifest_path, &manifest)
+        .map_err(|error| format!("failed to publish manifest: {error}"))?;
+    index_snapshot
+        .refresh(manifest_generation, manifest, index_storage)
+        .map_err(|error| format!("failed to refresh index snapshot: {error}"))?;
 
     println!(
         "built {} document(s), {} term(s), {} posting(s) into {}",
@@ -120,12 +138,12 @@ fn duration_milliseconds(duration: Duration) -> f64 {
 
 fn lookup_term(
     term: &str,
-    query_engine: &MultiSegmentQueryEngine,
+    index_snapshot: &IndexSnapshot,
     print_postings: bool,
 ) -> Result<(), String> {
     let total_started = Instant::now();
     let dictionary_lookup_started = Instant::now();
-    let query_result = query_engine
+    let query_result = index_snapshot
         .query_term_with_stats(term)
         .map_err(|error| format!("failed to query index: {error}"))?;
     let dictionary_lookup_duration = dictionary_lookup_started.elapsed();
@@ -158,7 +176,7 @@ fn lookup_term(
     }
 
     print_lookup_stats(
-        query_engine,
+        index_snapshot,
         dictionary_stats,
         dictionary_lookup_duration,
         postings_decode_duration,
@@ -169,7 +187,7 @@ fn lookup_term(
 }
 
 fn print_lookup_stats(
-    query_engine: &MultiSegmentQueryEngine,
+    index_snapshot: &IndexSnapshot,
     dictionary_stats: MultiSegmentDictionaryStats,
     dictionary_lookup_duration: Duration,
     postings_decode_duration: Duration,
@@ -177,13 +195,13 @@ fn print_lookup_stats(
     matched_document_count: usize,
 ) {
     println!("lookup statistics:");
-    println!("  indexed segments: {}", query_engine.segment_count());
-    println!("  segment bytes: {}", query_engine.total_segment_bytes());
+    println!("  indexed segments: {}", index_snapshot.segment_count());
+    println!("  segment bytes: {}", index_snapshot.total_segment_bytes());
     println!(
         "  indexed documents: {}",
-        query_engine.total_document_count()
+        index_snapshot.total_document_count()
     );
-    println!("  term entries: {}", query_engine.total_term_entries());
+    println!("  term entries: {}", index_snapshot.total_term_entries());
     println!(
         "  segments searched: {}",
         dictionary_stats.searched_segment_count
@@ -216,10 +234,7 @@ fn print_lookup_stats(
     println!("  total: {:.3} ms", duration_milliseconds(total_duration));
 }
 
-fn open_query_engine(index_storage: &IndexStorage) -> Result<MultiSegmentQueryEngine, String> {
-    let manifest = index_storage
-        .manifest_from_published_segments()
-        .map_err(|error| format!("failed to discover published segments: {error}"))?;
-    MultiSegmentQueryEngine::new(manifest, index_storage.segment_directory())
-        .map_err(|error| format!("failed to open published segments: {error}"))
+fn open_index_snapshot(index_storage: &IndexStorage) -> Result<IndexSnapshot, String> {
+    IndexSnapshot::new(index_storage)
+        .map_err(|error| format!("failed to open index storage: {error}"))
 }
